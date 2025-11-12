@@ -1,0 +1,11 @@
+{
+  "name": "Live Location Tracker",
+  "short_name": "Tracker",
+  "start_url": "index.html",
+  "display": "standalone",
+  "background_color": "#007bff",
+  "theme_color": "#007bff",
+  "icons": [
+    { "src": "https://img.icons8.com/color/96/000000/marker.png", "sizes": "96x96", "type": "image/png" }
+  ]
+}
