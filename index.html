@@ -508,7 +508,7 @@ async function startRecording(){
   }, 2000);
 }
 
-aasync function stopRecording(){
+async function stopRecording(){
   if(!recording) return;
   recording = false;
   clearInterval(recInterval);
@@ -517,30 +517,6 @@ aasync function stopRecording(){
   // finalize: draw full track
   await loadAllTracks();
   showAlert('Recording stopped');
-  // automatic GPX export
-  if(currentTrackId) await exportTrackGPXAuto(currentTrackId);
-  currentTrackId = null;
-  currentPolyline = null;
-  currentMarker = null;
-}
-async function exportTrackGPXAuto(tid){
-  const pts = allTracks[tid];
-  if(!pts || !pts.length) return;
-  const geojson = {
-    type:'FeatureCollection',
-    features: pts.map(p=>({
-      type:'Feature',
-      geometry:{ type:'Point', coordinates:[p.lon,p.lat] },
-      properties:{ ts:p.ts, speed:p.speed, activity:p.activity }
-    }))
-  };
-  const gpx = togpx(geojson, { creator:'BTMLiveTracker' });
-  const blob = new Blob([gpx], { type:'application/gpx+xml' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `${tid}.gpx`;
-  a.click();
-  showAlert(`GPX exported for track ${tid}`);
 }
 
 // --------------------------- Simple helpers for UI actions ---------------------------
