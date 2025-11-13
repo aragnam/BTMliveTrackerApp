@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>BTM Live Tracker - Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/localforage/1.10.0/localforage.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/togpx/0.0.6/togpx.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.12.0/dist/tf.min.js"></script>
+<style>
+body, html { margin:0; padding:0; height:100%; font-family:sans-serif; display:flex; }
+#sidebar { width:250px; background:#f8f8f8; overflow:auto; padding:10px; box-shadow:2px 0 5px rgba(0,0,0,0.2); transition: transform 0.3s; z-index:1000; }
+#sidebar.collapsed { transform: translateX(-240px); }
+#map { flex:1; height:100%; }
+.track-item { display:flex; justify-content:space-between; align-items:center; margin-bottom:5px; padding:3px 5px; border:1px solid #ddd; border-radius:5px; cursor:pointer; }
+.track-color { width:16px; height:16px; display:inline-block; margin-right:5px; border-radius:3px; }
+button { font-size:1rem; padding:6px 10px; margin-left:2px; cursor:pointer; border-radius:5px; }
+.alert { color:red; font-weight:bold; margin-top:5px; }
+.legend, #collapseBtn { position:absolute; background:#fff; padding:5px; border:1px solid #ccc; border-radius:5px; font-size:0.85rem; z-index:1000; }
+.legend { bottom:10px; left:10px; }
+#collapseBtn { top:10px; left:10px; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h3>Tracks</h3>
+  <div id="trackList"></div>
+  <div style="margin-top:10px;">
+    <button id="startRec">Start Recording</button>
+    <button id="stopRec" disabled>Stop Recording</button>
+  </div>
+  <div id="alerts" class="alert"></div>
+</div>
+
+<button id="collapseBtn">☰</button>
+<div class="legend">
+  <b>Activity:</b> <span style="color:green">Walking</span>, <span style="color:orange">Running</span>, <span style="color:blue">Cycling</span>, <span style="color:red">Driving</span><br/>
+  <b>Alerts:</b> ⚠️ Sudden Speed / Sharp Turn / Route Deviation
+</div>
+
+<div id="map"></div>
+
+<script>
+const map = L.map('map').setView([0,0],2);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution:'&copy; OSM' }).addTo(map);
+
+const trackStore = localforage.createInstance({ name:'BTMLiveTracker', storeName:'tracks' });
+
+let recording=false, currentTrackId=null, currentPolyline=null, currentMarker=null, prevPoint=null;
+let allTracks={}, polylineMap={}, alertMarkers=[];
+let trackVisibility={};
+window.geofences=[{lat:0, lon:0, radiusMeters:500}];
+
+function toRad(x){return x*Math.PI/180;}
+function toDeg(x){return x*180/Math.PI;}
+function haversineDistance(p1,p2){const R=6371000,dLat=toRad(p2.lat-p1.lat),dLon=toRad(p2.lon-p1.lon);const a=Math.sin(dLat/2)**2+Math.cos(toRad(p1.lat))*Math.cos(toRad(p2.lat))*Math.sin(dLon/2)**2;return 2*R*Math.asin(Math.sqrt(a));}
+function getBearing(p1,p2){const lat1=toRad(p1.lat),lat2=toRad(p2.lat),dLon=toRad(p2.lon-p1.lon);const y=Math.sin(dLon)*Math.cos(lat2);const x=Math.cos(lat1)*Math.sin(lat2)-Math.sin(lat1)*Math.cos(lat2)*Math.cos(dLon);return toDeg(Math.atan2(y,x));}
+function classifyActivity(speedKmh){if(speedKmh<6) return 'walking'; if(speedKmh<15) return 'running'; if(speedKmh<30) return 'cycling'; return 'driving';}
+function showAlert(msg){const div=document.getElementById('alerts'); div.innerText=msg; setTimeout(()=>div.innerText='',5000); const marker=L.marker(currentMarker?currentMarker.getLatLng():[0,0], {title:msg, icon:L.divIcon({className:'alertMarker', html:'⚠️'})}).addTo(map); alertMarkers.push(marker);}
+
+// Geofence
+function pointInCircle(lat, lon, cLat, cLon, radius){const R=6371000; const dLat=toRad(lat-cLat); const dLon=toRad(lon-cLon); const a=Math.sin(dLat/2)**2 + Math.cos(toRad(lat))*Math.cos(toRad(cLat))*Math.sin(dLon/2)**2; const c=2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); return (R*c)<=radius;}
+function checkGeofences(point){window.geofences.forEach(f=>{if(!pointInCircle(point.lat,point.lon,f.lat,f.lon)) showAlert('⚠️ Left geofence');});}
+
+// Store point
+async function storePoint(trackId,point){
+  const pts = (await trackStore.getItem(trackId)) || [];
+  pts.push(point); await trackStore.setItem(trackId,pts);
+  detectAnomaly(point); checkGeofences(point);
+}
+
+// Load tracks
+async function loadTracks(){
+  allTracks={}; polylineMap={}; trackVisibility={};
+  await trackStore.iterate((pts,key)=>{allTracks[key]=pts; trackVisibility[key]=true;});
+  const container=document.getElementById('trackList'); container.innerHTML='';
+  const colors=['blue','purple','brown','pink','teal','grey']; let i=0;
+  Object.keys(allTracks).forEach(tid=>{
+    const color=colors[i%colors.length]; i++;
+    const div=document.createElement('div'); div.className='track-item';
+    div.innerHTML=`<span><span class="track-color" style="background:${color}"></span>${tid} (${allTracks[tid].length} pts)</span>
+      <span>
+        <button onclick="playTrack('${tid}')">▶️</button>
+        <button onclick="exportTrackCSV('${tid}')">CSV</button>
+        <button onclick="exportTrackGPX('${tid}')">GPX</button>
+        <button onclick="toggleTrack('${tid}')">👁️</button>
+        <button onclick="deleteTrack('${tid}')">🗑️</button>
+      </span>`;
+    container.appendChild(div);
+
+    const poly = L.polyline(allTracks[tid].map(p=>[p.lat,p.lon]), {color:color}).addTo(map);
+    polylineMap[tid]=poly;
+  });
+}
+
+// Toggle visibility
+window.toggleTrack=function(tid){trackVisibility[tid]=!trackVisibility[tid]; if(polylineMap[tid]) polylineMap[tid][trackVisibility[tid]?'addTo':'removeFrom'](map);}
+
+// Playback
+let playbackInterval=null;
+window.playTrack=function(tid){
+  const points=allTracks[tid]; if(!points||!points.length) return;
+  if(currentPolyline) map.removeLayer(currentPolyline);
+  if(currentMarker) map.removeLayer(currentMarker);
+  currentPolyline=L.polyline([], {color:'red'}).addTo(map);
+  currentMarker=L.marker([points[0].lat,points[0].lon]).addTo(map);
+  let i=0; if(playbackInterval) clearInterval(playbackInterval);
+  playbackInterval=setInterval(()=>{if(i>=points.length){clearInterval(playbackInterval);return;}
+    const p=points[i]; currentPolyline.addLatLng([p.lat,p.lon]); currentMarker.setLatLng([p.lat,p.lon]); map.setView([p.lat,p.lon],16); i++;
+  },500);
+}
+
+// Export/Delete
+window.exportTrackCSV=async function(tid){const pts=allTracks[tid]; if(!pts) return; let csv='lat,lon,ts,speed,activity\n'; pts.forEach(p=>csv+=`${p.lat},${p.lon},${p.ts},${p.speed},${p.activity}\n`); const blob=new Blob([csv],{type:'text/csv'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`${tid}.csv`; a.click();}
+window.exportTrackGPX=async function(tid){const pts=allTracks[tid]; if(!pts) return; const geojson={type:'FeatureCollection', features:pts.map(p=>({type:'Feature', geometry:{type:'Point',coordinates:[p.lon,p.lat]}, properties:{ts:p.ts,speed:p.speed,activity:p.activity}}))}; const gpx=togpx(geojson,{creator:'BTMLiveTracker'}); const blob=new Blob([gpx],{type:'application/gpx+xml'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`${tid}.gpx`; a.click();}
+window.deleteTrack=async function(tid){if(!confirm(`Delete ${tid}?`)) return; await trackStore.removeItem(tid); loadTracks();}
+
+// Recording
+document.getElementById('startRec').onclick=()=>{
+  recording=true; currentTrackId=`track_${new Date().toISOString()}`; currentPolyline=L.polyline([], {color:'blue'}).addTo(map); currentMarker=null; prevPoint=null;
+  document.getElementById('startRec').disabled=true; document.getElementById('stopRec').disabled=false; alert(`Recording started: ${currentTrackId}`);
+}
+document.getElementById('stopRec').onclick=()=>{recording=false; currentTrackId=null; currentPolyline=null; currentMarker=null; document.getElementById('startRec').disabled=false; document.getElementById('stopRec').disabled=true; loadTracks(); alert('Recording stopped');}
+
+// GPS
+async function getCurrentLocation(){return new Promise(resolve=>{if(navigator.geolocation){navigator.geolocation.getCurrentPosition(pos=>{resolve({lat:pos.coords.latitude, lon:pos.coords.longitude, ts:new Date().toISOString(), speed:(pos.coords.speed||0)*3.6});}, ()=>resolve({lat:0, lon:0, ts:new Date().toISOString(), speed:0}));}else resolve({lat:0, lon:0, ts:new Date().toISOString(), speed:0});});}
+
+// Record loop
+setInterval(async ()=>{
+  if(recording && currentTrackId){
+    const point=await getCurrentLocation(); point.activity=classifyActivity(point.speed);
+    await storePoint(currentTrackId,point);
+    const colorMap={walking:'green', running:'orange', cycling:'blue', driving:'red'};
+    if(!currentPolyline) currentPolyline=L.polyline([], {color: colorMap[point.activity]}).addTo(map);
+    currentPolyline.addLatLng([point.lat, point.lon]);
+    if(!currentMarker) currentMarker=L.marker([point.lat, point.lon]).addTo(map); else currentMarker.setLatLng([point.lat, point.lon]);
+  }
+},2000);
+
+// Anomaly detection
+function detectAnomaly(point){
+  if(!prevPoint){prevPoint=point; return;}
+  const deltaSpeed=point.speed-prevPoint.speed; if(deltaSpeed>20) showAlert(`⚠️ Sudden speed increase: +${deltaSpeed.toFixed(1)} km/h`);
+  const bearing=getBearing(prevPoint,point); if(Math.abs(bearing)>90) showAlert('⚠️ Sharp turn detected');
+  Object.values(allTracks).forEach(hist=>{if(hist.length<2) return; if(isRouteDeviation(point,hist)) showAlert('⚠️ Route deviation');});
+  prevPoint=point;
+}
+function isRouteDeviation(point,hist,threshold=50){for(const hp of hist){if(haversineDistance(point,hp)<=threshold) return false;} return true;}
+
+// Collapsible Sidebar
+document.getElementById('collapseBtn').onclick=()=>{
+  document.getElementById('sidebar').classList.toggle('collapsed');
+}
+
+// Init
+loadTracks();
+</script>
+
+</body>
+</html>
