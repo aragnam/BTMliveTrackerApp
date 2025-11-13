@@ -1,307 +1,646 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<title>BTM Live Tracker Dashboard</title>
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+<meta charset="utf-8" />
+<title>BTM Live Tracker — Full Dashboard (OSM)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/localforage/1.10.0/localforage.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/togpx/0.0.6/togpx.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.12.0/dist/tf.min.js"></script>
 
 <style>
-html, body {
-  margin: 0;
-  padding: 0;
-  height: 100%;
-  font-family: Arial, sans-serif;
-}
-body {
-  display: flex;
-  flex-direction: column;
-}
-#map {
-  height: 60vh;          /* key: explicit height */
-  min-height: 300px;
-}
-#sidebar {
-  background: #fafafa;
-  padding: 10px;
-  border-bottom: 1px solid #ccc;
-  overflow-x: auto;
-  white-space: nowrap;
-}
-button {
-  padding: 8px 12px;
-  font-size: 1rem;
-  margin: 3px;
-  border-radius: 5px;
-}
-#charts {
-  display: flex;
-  flex-direction: column;
-  padding: 5px;
-}
-canvas {
-  background: #fff;
-  border: 1px solid #ccc;
-  margin: 5px 0;
-  border-radius: 8px;
-}
-.legend {
-  position: absolute;
-  bottom: 10px;
-  left: 10px;
-  background: #fff;
-  padding: 5px;
-  font-size: 0.8rem;
-  border: 1px solid #ccc;
-  border-radius: 5px;
-  z-index: 1000;
-}
+:root{--sidebar-width:320px}
+html,body{height:100%;margin:0;font-family:Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;}
+.app{display:flex;height:100vh;overflow:hidden}
+#sidebar{width:var(--sidebar-width);min-width:260px;background:#f8fafc;border-right:1px solid #e6eef6;padding:12px;box-sizing:border-box;overflow:auto;transition:transform .22s ease;z-index:1100}
+#sidebar.collapsed{transform:translateX(calc(-1 * var(--sidebar-width)))}
+#mapWrap{flex:1;display:flex;flex-direction:column;position:relative}
+#map{height:62vh;min-height:360px}
+.controls{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
+button{background:#fff;border:1px solid #cbd5e1;padding:8px 10px;border-radius:8px;cursor:pointer;font-size:0.95rem}
+.small{padding:6px 8px;font-size:0.85rem}
+.track-item{display:flex;justify-content:space-between;align-items:center;padding:8px;border-radius:8px;background:#fff;border:1px solid #e6eef6;margin-bottom:8px}
+.track-meta{display:flex;align-items:center;gap:8px}
+.track-color{width:18px;height:18px;border-radius:4px;display:inline-block}
+.legend{position:absolute;left:12px;bottom:12px;background:#fff;padding:8px;border-radius:8px;border:1px solid #e6eef6;z-index:1200;font-size:0.85rem}
+.alerts{color:#b91c1c;font-weight:600;margin-top:8px}
+#charts{display:flex;gap:12px;padding:10px;background:#ffffff;border-top:1px solid #eef2f7}
+#speedWrap,#activityWrap{flex:1;min-width:200px;background:#fff;border-radius:8px;border:1px solid #e6eef6;padding:8px}
+canvas{width:100% !important;height:160px !important}
+.footer-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.searchrow{display:flex;gap:8px;margin-top:8px}
+@media(max-width:900px){#sidebar{position:absolute;z-index:1300;height:100vh} #map{height:52vh}}
 </style>
 </head>
 <body>
+<div class="app">
+  <aside id="sidebar" role="region" aria-label="Sidebar">
+    <h2 style="margin:0 0 8px 0">BTM Live Tracker</h2>
 
-<div id="sidebar">
-  <button id="startBtn">Start Recording</button>
-  <button id="stopBtn" disabled>Stop</button>
-  <button id="showTracksBtn">Show Tracks</button>
-  <span id="statusMsg"></span>
-</div>
+    <div class="controls">
+      <button id="startRec">Start Recording</button>
+      <button id="stopRec" disabled>Stop</button>
+      <button id="trainAI" class="small">Train Predictor</button>
+    </div>
 
-<div id="map"></div>
+    <div style="font-size:0.92rem;color:#334155;margin-bottom:6px">Tracks</div>
+    <div id="trackList" aria-live="polite"></div>
 
-<div id="charts">
-  <canvas id="speedChart" height="80"></canvas>
-  <canvas id="headingChart" height="80"></canvas>
-  <canvas id="activityTimeline" height="60"></canvas>
-</div>
+    <div style="margin-top:8px">
+      <div style="font-weight:600;margin-bottom:6px">Geofences</div>
+      <div id="geofenceList" style="font-size:0.9rem;color:#334155"></div>
+      <div class="searchrow">
+        <input id="gfLat" placeholder="lat" style="width:92px;padding:6px;border-radius:6px;border:1px solid #cbd5e1"/>
+        <input id="gfLon" placeholder="lon" style="width:92px;padding:6px;border-radius:6px;border:1px solid #cbd5e1"/>
+        <input id="gfRad" placeholder="meters" style="width:92px;padding:6px;border-radius:6px;border:1px solid #cbd5e1"/>
+        <button id="addGeofence" class="small">Add</button>
+      </div>
+    </div>
 
-<div class="legend">
-  <b>Colors:</b> <span style="color:green">Walking</span>,
-  <span style="color:orange">Running</span>,
-  <span style="color:blue">Cycling</span>,
-  <span style="color:red">Driving</span>
+    <div class="alerts" id="alerts" role="status"></div>
+
+    <hr style="margin:12px 0;border:none;border-top:1px solid #eef2f7"/>
+
+    <div style="font-weight:600;margin-bottom:6px">Quick actions</div>
+    <div class="footer-actions">
+      <button id="showAll" class="small">Show All</button>
+      <button id="hideAll" class="small">Hide All</button>
+      <button id="exportAll" class="small">Export All (CSV)</button>
+      <button id="clearAll" class="small">Delete All</button>
+    </div>
+
+    <div style="margin-top:12px;font-size:0.85rem;color:#64748b">
+      Tip: Allow location in browser. Use Train Predictor after you have several tracks recorded.
+    </div>
+  </aside>
+
+  <main id="mapWrap">
+    <button id="collapseBtn" style="position:absolute;left:12px;top:12px;z-index:1300;border-radius:8px;padding:8px;background:#fff;border:1px solid #e6eef6;cursor:pointer">☰</button>
+    <div id="map" aria-label="Map"></div>
+
+    <div id="charts">
+      <div id="speedWrap">
+        <div style="font-weight:600;margin-bottom:6px">Speed & Heading (live)</div>
+        <canvas id="speedChart"></canvas>
+      </div>
+      <div id="activityWrap">
+        <div style="font-weight:600;margin-bottom:6px">Activity Timeline</div>
+        <canvas id="activityChart"></canvas>
+      </div>
+    </div>
+
+    <div class="legend" id="legend">
+      <div style="font-weight:700;margin-bottom:6px">Legend</div>
+      <div><span style="color:#16a34a">●</span> Walking &nbsp;<span style="color:#f97316">●</span> Running &nbsp;<span style="color:#2563eb">●</span> Cycling &nbsp;<span style="color:#dc2626">●</span> Driving</div>
+      <div style="margin-top:6px">Alerts: ⚠️ sudden speed, sharp turn, route deviation, geofence</div>
+    </div>
+  </main>
 </div>
 
 <script>
-document.addEventListener('DOMContentLoaded', () => {
-  // 1) MAP SETUP
-  const map = L.map('map').setView([0, 0], 2);
+// --------------------------- Utilities & Storage ---------------------------
+const db = localforage.createInstance({ name:'BTM_Tracker', storeName:'tracks' });
 
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+function toRad(v){ return v * Math.PI / 180; }
+function toDeg(v){ return v * 180 / Math.PI; }
+function haversine(a,b){
+  const R = 6371000;
+  const dLat = toRad(b.lat - a.lat), dLon = toRad(b.lon - a.lon);
+  const x = Math.sin(dLat/2)**2 + Math.cos(toRad(a.lat))*Math.cos(toRad(b.lat))*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(x));
+}
+function bearing(a,b){
+  const lat1 = toRad(a.lat), lat2 = toRad(b.lat), dLon = toRad(b.lon - a.lon);
+  const y = Math.sin(dLon)*Math.cos(lat2);
+  const x = Math.cos(lat1)*Math.sin(lat2) - Math.sin(lat1)*Math.cos(lat2)*Math.cos(dLon);
+  return (toDeg(Math.atan2(y,x)) + 360) % 360;
+}
+function classifyActivity(speedKmh){
+  if(speedKmh < 6) return 'walking';
+  if(speedKmh < 15) return 'running';
+  if(speedKmh < 30) return 'cycling';
+  return 'driving';
+}
+function shortTs(ts){
+  return new Date(ts).toLocaleTimeString();
+}
+function uuid(){ return 't_'+Date.now()+'_'+Math.random().toString(36).slice(2,8); }
+
+// --------------------------- Map init & sizing fix ---------------------------
+let map, baseLayer;
+function initMap(){
+  map = L.map('map', { preferCanvas:true }).setView([0,0], 2);
+  baseLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap contributors'
   }).addTo(map);
+  // ensure tile load and correct sizing
+  setTimeout(()=>map.invalidateSize(), 300);
+  window.addEventListener('resize', ()=> map.invalidateSize());
+}
 
-  // Fix for Leaflet + flexbox layouts
-  setTimeout(() => map.invalidateSize(), 300);
+// --------------------------- State ---------------------------
+let recording=false;
+let currentTrackId=null;
+let currentPolyline=null;
+let currentMarker=null;
+let prevPoint=null;
+let allTracks = {}; // tid -> [points]
+let polylineMap = {}; // tid -> base polyline
+let segmentMap = {}; // tid -> [activity segment polylines]
+let visibility = {}; // tid -> boolean
+let alertMarkers = [];
+let geofences = []; // {lat,lon,radius,leafletCircle}
+let predictorModel = null;
+let predictorReady = false;
 
-  // 2) DATA STORAGE
-  const db = localforage.createInstance({ name: 'BTMLive', storeName: 'tracks' });
+// color map for activity
+const activityColor = { walking:'#16a34a', running:'#f97316', cycling:'#2563eb', driving:'#dc2626' };
+const palette = ['#1f77b4','#9467bd','#8c564b','#e377c2','#17becf','#7f7f7f'];
 
-  let recording = false;
-  let trackId = null;
-  let trackData = [];
-  let polyline = null;
-  let marker = null;
-  let prev = null;
-  let recInterval = null;
-
-  const colors = { walking: 'green', running: 'orange', cycling: 'blue', driving: 'red' };
-
-  // 3) CHARTS
-  const speedChart = new Chart(document.getElementById('speedChart'), {
-    type: 'line',
-    data: {
-      labels: [],
-      datasets: [{
-        label: 'Speed (km/h)',
-        data: [],
-        borderColor: 'blue',
-        tension: 0.2
-      }]
-    },
-    options: {
-      animation: false,
-      scales: { x: { display: false }, y: { beginAtZero: true } }
-    }
+// --------------------------- Charts ---------------------------
+let speedChart, activityChart;
+function initCharts(){
+  const ctxSpeed = document.getElementById('speedChart').getContext('2d');
+  speedChart = new Chart(ctxSpeed, {
+    type:'line',
+    data:{ labels:[], datasets:[
+      { label:'Speed (km/h)', data:[], borderColor:'#ef4444', yAxisID:'y1', tension:0.2, fill:true, backgroundColor:'rgba(239,68,68,0.08)' },
+      { label:'Heading (°)', data:[], borderColor:'#06b6d4', yAxisID:'y2', tension:0.2, fill:false }
+    ]},
+    options:{ animation:false, scales:{ y1:{ position:'left', beginAtZero:true }, y2:{ position:'right', min:0, max:360 } } }
   });
 
-  const headingChart = new Chart(document.getElementById('headingChart'), {
-    type: 'line',
-    data: {
-      labels: [],
-      datasets: [{
-        label: 'Heading (°)',
-        data: [],
-        borderColor: 'orange',
-        tension: 0.2
-      }]
-    },
-    options: {
-      animation: false,
-      scales: { x: { display: false }, y: { min: 0, max: 360 } }
+  const ctxAct = document.getElementById('activityChart').getContext('2d');
+  activityChart = new Chart(ctxAct, {
+    type:'bar',
+    data:{ labels:[], datasets:[{ label:'activity', data:[], backgroundColor:[] }] },
+    options:{ animation:false, plugins:{ legend:{ display:false } }, scales:{ x:{ display:false }, y:{ display:false } } }
+  });
+}
+
+// --------------------------- UI helpers ---------------------------
+function showAlert(msg, latlng){
+  const el = document.getElementById('alerts');
+  el.textContent = msg;
+  setTimeout(()=>{ if(el.textContent === msg) el.textContent = ''; }, 6000);
+  if(latlng && map){
+    const mk = L.marker(latlng, { title: msg }).bindPopup(msg).addTo(map);
+    alertMarkers.push(mk);
+  } else if(currentMarker){
+    const mk = L.marker(currentMarker.getLatLng(), { title: msg }).bindPopup(msg).addTo(map);
+    alertMarkers.push(mk);
+  }
+}
+function clearAlerts(){
+  alertMarkers.forEach(m => map.removeLayer(m));
+  alertMarkers = [];
+  document.getElementById('alerts').textContent = '';
+}
+
+// --------------------------- Track storage & rendering ---------------------------
+async function savePoint(trackId, point){
+  const arr = (await db.getItem(trackId)) || [];
+  arr.push(point);
+  await db.setItem(trackId, arr);
+  allTracks[trackId] = arr;
+  // render live
+  if(currentTrackId === trackId){
+    drawLivePoint(point);
+  }
+  // update track list (counts)
+  refreshTrackList();
+}
+
+async function loadAllTracks(){
+  allTracks = {};
+  await db.iterate((value, key)=>{ if(key !== '__geofences__') allTracks[key] = value; });
+  // draw all
+  clearAllPolylines();
+  let i=0;
+  for(const tid of Object.keys(allTracks)){
+    const color = palette[i % palette.length]; i++;
+    visibility[tid] = true;
+    drawFullTrack(tid, color);
+    addTrackListItem(tid, color, allTracks[tid].length);
+  }
+  map.invalidateSize();
+}
+
+function clearAllPolylines(){
+  Object.values(polylineMap).forEach(p=>map.removeLayer(p));
+  polylineMap = {};
+  Object.values(segmentMap).flat().forEach(s=>map.removeLayer(s));
+  segmentMap = {};
+}
+
+// Draw entire track with activity-colored segments
+function drawFullTrack(tid, baseColor){
+  const pts = allTracks[tid] || [];
+  if(!pts.length) return;
+  // build segments by activity
+  const segments = [];
+  let curAct = pts[0].activity || classifyActivity(pts[0].speed||0);
+  let curPts = [pts[0]];
+  for(let i=1;i<pts.length;i++){
+    const a = pts[i].activity || classifyActivity(pts[i].speed||0);
+    if(a === curAct){ curPts.push(pts[i]); }
+    else { segments.push({activity:curAct, pts:curPts}); curAct = a; curPts=[pts[i]]; }
+  }
+  segments.push({activity:curAct, pts:curPts});
+  // draw segments
+  const segLayers = [];
+  segments.forEach(seg=>{
+    if(seg.pts.length>1){
+      const coords = seg.pts.map(p=>[p.lat,p.lon]);
+      const poly = L.polyline(coords, { color: activityColor[seg.activity] || baseColor, weight:4, opacity:0.9 }).addTo(map);
+      segLayers.push(poly);
     }
   });
+  segmentMap[tid] = segLayers;
+  // base polyline (thin) for click toggling
+  const baseCoords = pts.map(p=>[p.lat,p.lon]);
+  const base = L.polyline(baseCoords, { color: baseColor, weight:2, opacity:0.6 }).addTo(map);
+  base.on('click', ()=>{ visibility[tid] = !visibility[tid]; toggleVisibility(tid); });
+  polylineMap[tid] = base;
+}
 
-  const activityTimeline = new Chart(document.getElementById('activityTimeline'), {
-    type: 'bar',
-    data: {
-      labels: [],
-      datasets: [{
-        label: 'Activity',
-        data: [],
-        backgroundColor: []
-      }]
-    },
-    options: {
-      animation: false,
-      scales: { x: { display: false }, y: { display: false } }
-    }
+function drawLivePoint(point){
+  if(!currentPolyline){
+    currentPolyline = L.polyline([], { color: activityColor[point.activity] || '#1f77b4', weight:4 }).addTo(map);
+  }
+  currentPolyline.addLatLng([point.lat, point.lon]);
+  if(!currentMarker) currentMarker = L.marker([point.lat, point.lon]).addTo(map);
+  else currentMarker.setLatLng([point.lat, point.lon]);
+}
+
+// --------------------------- Track list UI ---------------------------
+function addTrackListItem(tid, color, count){
+  // avoid duplicates
+  if(document.getElementById('item_'+tid)) return;
+  const list = document.getElementById('trackList');
+  const div = document.createElement('div'); div.className = 'track-item'; div.id = 'item_'+tid;
+  div.innerHTML = `<div class="track-meta"><span class="track-color" style="background:${color}"></span><div style="font-size:0.95rem">${tid}<div style="font-size:0.8rem;color:#64748b">${count} pts</div></div></div>
+    <div style="display:flex;gap:6px;align-items:center">
+      <button onclick="playTrack('${tid}')" title="Play">▶</button>
+      <button onclick="exportTrackCSV('${tid}')" title="CSV">CSV</button>
+      <button onclick="exportTrackGPX('${tid}')" title="GPX">GPX</button>
+      <button onclick="toggleVisibility('${tid}')" title="Toggle">👁</button>
+      <button onclick="deleteTrack('${tid}')" title="Delete">🗑️</button>
+    </div>`;
+  list.prepend(div);
+}
+
+function refreshTrackList(){
+  // update counts and ensure list matches allTracks
+  const list = document.getElementById('trackList');
+  list.innerHTML = '';
+  let i=0;
+  for(const tid of Object.keys(allTracks).sort().reverse()){
+    const cnt = allTracks[tid].length;
+    const color = palette[i % palette.length]; i++;
+    addTrackListItem(tid, color, cnt);
+  }
+}
+
+// --------------------------- Visibility / toggles ---------------------------
+function toggleVisibility(tid){
+  if(!polylineMap[tid]) return;
+  visibility[tid] = !visibility[tid];
+  if(visibility[tid]){
+    polylineMap[tid].addTo(map);
+    (segmentMap[tid]||[]).forEach(s=>s.addTo(map));
+  } else {
+    map.removeLayer(polylineMap[tid]);
+    (segmentMap[tid]||[]).forEach(s=>map.removeLayer(s));
+  }
+}
+
+// --------------------------- Export / Delete ---------------------------
+async function exportTrackCSV(tid){
+  const pts = allTracks[tid];
+  if(!pts) return alert('No points');
+  let csv = 'lat,lon,ts,speed,activity\n';
+  pts.forEach(p => csv += `${p.lat},${p.lon},${p.ts},${p.speed||''},${p.activity||''}\n`);
+  const blob = new Blob([csv], { type:'text/csv' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${tid}.csv`; a.click();
+}
+async function exportTrackGPX(tid){
+  const pts = allTracks[tid];
+  if(!pts) return alert('No points');
+  const geojson = { type:'FeatureCollection', features: pts.map(p=>({ type:'Feature', geometry:{type:'Point', coordinates:[p.lon,p.lat]}, properties:{ts:p.ts,speed:p.speed,activity:p.activity} })) };
+  const gpx = togpx(geojson, { creator:'BTMLiveTracker' });
+  const blob = new Blob([gpx], { type:'application/gpx+xml' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${tid}.gpx`; a.click();
+}
+async function deleteTrack(tid){
+  if(!confirm('Delete '+tid+'?')) return;
+  await db.removeItem(tid);
+  // remove from map
+  if(polylineMap[tid]) { map.removeLayer(polylineMap[tid]); delete polylineMap[tid]; }
+  if(segmentMap[tid]) { segmentMap[tid].forEach(s=>map.removeLayer(s)); delete segmentMap[tid]; }
+  delete allTracks[tid];
+  document.getElementById('item_'+tid)?.remove();
+}
+
+// --------------------------- Geofence functions ---------------------------
+function renderGeofenceUI(){
+  const el = document.getElementById('geofenceList');
+  el.innerHTML = geofences.map((g,i)=>`G${i+1}: ${g.lat.toFixed(4)}, ${g.lon.toFixed(4)} (r=${g.radius}m)`).join('<br>');
+}
+function addGeofence(lat,lon,radius){
+  const circle = L.circle([lat,lon], { radius, color:'#f59e0b', weight:1 }).addTo(map);
+  geofences.push({lat,lon,radius,leaflet:circle});
+  renderGeofenceUI();
+  // persist geofences
+  db.setItem('__geofences__', geofences.map(g=>({lat:g.lat,lon:g.lon,radius:g.radius})));
+}
+function checkGeofencesForPoint(pt){
+  geofences.forEach(g=>{
+    const inside = haversine(pt, {lat:g.lat, lon:g.lon}) <= g.radius;
+    if(!inside) showAlert('⚠️ Left geofence', [pt.lat, pt.lon]);
   });
+}
 
-  // 4) HELPERS
-  function classify(speed) {
-    if (speed < 6) return 'walking';
-    if (speed < 15) return 'running';
-    if (speed < 30) return 'cycling';
-    return 'driving';
-  }
-
-  function getBearing(p1, p2) {
-    const toRad = x => x * Math.PI / 180;
-    const toDeg = x => x * 180 / Math.PI;
-    const y = Math.sin(toRad(p2.lon - p1.lon)) * Math.cos(toRad(p2.lat));
-    const x =
-      Math.cos(toRad(p1.lat)) * Math.sin(toRad(p2.lat)) -
-      Math.sin(toRad(p1.lat)) * Math.cos(toRad(p2.lat)) * Math.cos(toRad(p2.lon - p1.lon));
-    return (toDeg(Math.atan2(y, x)) + 360) % 360;
-  }
-
-  function haversine(p1, p2) {
-    const R = 6371e3;
-    const toRad = x => x * Math.PI / 180;
-    const dLat = toRad(p2.lat - p1.lat);
-    const dLon = toRad(p2.lon - p1.lon);
-    const a =
-      Math.sin(dLat / 2) ** 2 +
-      Math.cos(toRad(p1.lat)) * Math.cos(toRad(p2.lat)) *
-      Math.sin(dLon / 2) ** 2;
-    return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  }
-
-  function updateCharts(point) {
-    const label = new Date(point.ts).toLocaleTimeString();
-
-    // Speed
-    if (speedChart.data.labels.length > 120) {
-      speedChart.data.labels.shift();
-      speedChart.data.datasets[0].data.shift();
+// --------------------------- Anomaly detection ---------------------------
+function detectAnomalies(point){
+  // sudden speed jump
+  if(prevPoint){
+    const ds = (point.speed||0) - (prevPoint.speed||0);
+    if(ds > 20) showAlert(`⚠️ Sudden speed increase +${ds.toFixed(1)} km/h`, [point.lat, point.lon]);
+    // sharp turn detection using last bearing
+    if(prevPoint._bearing !== undefined){
+      const bPrev = prevPoint._bearing;
+      const bCur = bearing(prevPoint, point);
+      const diff = Math.abs(((bCur - bPrev + 540) % 360) - 180);
+      if(diff > 90) showAlert('⚠️ Sharp turn detected', [point.lat, point.lon]);
     }
-    speedChart.data.labels.push(label);
-    speedChart.data.datasets[0].data.push(point.speed);
-    speedChart.update();
-
-    // Heading
-    if (headingChart.data.labels.length > 120) {
-      headingChart.data.labels.shift();
-      headingChart.data.datasets[0].data.shift();
-    }
-    headingChart.data.labels.push(label);
-    headingChart.data.datasets[0].data.push(point.heading || 0);
-    headingChart.update();
-
-    // Activity timeline
-    if (activityTimeline.data.labels.length > 120) {
-      activityTimeline.data.labels.shift();
-      activityTimeline.data.datasets[0].data.shift();
-      activityTimeline.data.datasets[0].backgroundColor.shift();
-    }
-    activityTimeline.data.labels.push(label);
-    activityTimeline.data.datasets[0].data.push(1);
-    activityTimeline.data.datasets[0].backgroundColor.push(colors[point.activity]);
-    activityTimeline.update();
-  }
-
-  async function recordPoint() {
-    if (!recording) return;
-    navigator.geolocation.getCurrentPosition(async pos => {
-      const lat = pos.coords.latitude;
-      const lon = pos.coords.longitude;
-      const spd = (pos.coords.speed || 0) * 3.6; // m/s → km/h
-      const act = classify(spd);
-
-      const point = {
-        lat,
-        lon,
-        ts: Date.now(),
-        speed: spd,
-        activity: act
-      };
-
-      if (prev) {
-        point.heading = getBearing(prev, point);
-        const dist = haversine(prev, point);
-        if (dist > 0.5) {
-          trackData.push(point);
-          polyline.addLatLng([lat, lon]);
-          marker.setLatLng([lat, lon]);
-          map.setView([lat, lon], 17);
-          await db.setItem(trackId, trackData);
-          updateCharts(point);
-        }
-      } else {
-        polyline = L.polyline([[lat, lon]], { color: colors[act] }).addTo(map);
-        marker = L.marker([lat, lon]).addTo(map);
-        map.setView([lat, lon], 17);
+    point._bearing = bearing(prevPoint, point);
+    // route deviation using nearest distance to historical points
+    for(const histId of Object.keys(allTracks)){
+      const hist = allTracks[histId];
+      if(!hist || hist.length < 10) continue;
+      // sample hist
+      let minD = Infinity;
+      for(let i=0;i<hist.length;i+=Math.max(1, Math.floor(hist.length/60))){
+        const d = haversine(point, hist[i]);
+        if(d < minD) minD = d;
+        if(minD < 50) break;
       }
-
-      prev = point;
-    }, err => {
-      console.error('Geolocation error:', err);
-    });
-  }
-
-  // 5) BUTTON HANDLERS
-  document.getElementById('startBtn').onclick = () => {
-    recording = true;
-    trackId = 'track_' + new Date().toISOString();
-    trackData = [];
-    prev = null;
-
-    document.getElementById('statusMsg').textContent = 'Recording...';
-    document.getElementById('startBtn').disabled = true;
-    document.getElementById('stopBtn').disabled = false;
-
-    recInterval = setInterval(recordPoint, 3000);
-  };
-
-  document.getElementById('stopBtn').onclick = () => {
-    recording = false;
-    clearInterval(recInterval);
-    document.getElementById('statusMsg').textContent = 'Stopped';
-    document.getElementById('startBtn').disabled = false;
-    document.getElementById('stopBtn').disabled = true;
-  };
-
-  document.getElementById('showTracksBtn').onclick = async () => {
-    // Simple loader to demonstrate tracks redraw
-    const keys = await db.keys();
-    if (!keys.length) {
-      alert('No saved tracks yet.');
-      return;
+      if(minD > 150){ showAlert('⚠️ Route deviation detected', [point.lat, point.lon]); break; }
     }
-    const lastKey = keys[keys.length - 1];
-    const data = await db.getItem(lastKey);
-    if (!data || !data.length) return;
+  }
+  prevPoint = point;
+}
 
-    const latlngs = data.map(p => [p.lat, p.lon]);
-    L.polyline(latlngs, { color: 'purple' }).addTo(map);
-    map.fitBounds(latlngs);
-  };
+// --------------------------- AI Predictor (TF.js) ---------------------------
+/*
+ Simple model: predict next lat & lon from last 3 (lat,lon,speed) flattened.
+ Training data: sliding windows from stored tracks (if enough data).
+ If prediction error (haversine) > threshold => alert.
+*/
+async function trainPredictor(){
+  // collect windows
+  const X = []; const Y = [];
+  for(const tid of Object.keys(allTracks)){
+    const pts = allTracks[tid];
+    if(pts.length < 10) continue;
+    for(let i=3;i<pts.length;i++){
+      const prev3 = pts.slice(i-3,i);
+      const input = [];
+      prev3.forEach(p=>{ input.push(p.lat, p.lon, p.speed||0); });
+      X.push(input);
+      Y.push([pts[i].lat, pts[i].lon]);
+    }
+  }
+  if(X.length < 50){ alert('Not enough data to train predictor (need ~50 windows).'); return; }
+  // build tensors
+  const xs = tf.tensor2d(X);
+  const ys = tf.tensor2d(Y);
+  // simple dense model
+  const model = tf.sequential();
+  model.add(tf.layers.dense({ inputShape:[X[0].length], units:64, activation:'relu' }));
+  model.add(tf.layers.dense({ units:32, activation:'relu' }));
+  model.add(tf.layers.dense({ units:2 })); // lat, lon
+  model.compile({ optimizer:'adam', loss:'meanSquaredError' });
+  // show training UI
+  showAlert('Training predictor (this may take a few seconds)...');
+  await model.fit(xs, ys, { epochs:25, batchSize:64, callbacks:{
+    onEpochEnd: (epoch, logs) => { /* optional progress */ }
+  }});
+  predictorModel = model;
+  predictorReady = true;
+  showAlert('Predictor trained — enabled');
+  xs.dispose(); ys.dispose();
+}
+
+// use predictor on live stream
+async function predictNext(ptSequence){
+  if(!predictorReady || !predictorModel) return null;
+  // ptSequence: last 3 points [{lat,lon,speed},...]
+  if(ptSequence.length < 3) return null;
+  const input = [];
+  ptSequence.slice(-3).forEach(p=>{ input.push(p.lat, p.lon, p.speed || 0); });
+  const t = tf.tensor2d([input]);
+  const pred = predictorModel.predict(t);
+  const arr = await pred.array();
+  t.dispose(); pred.dispose();
+  return { lat: arr[0][0], lon: arr[0][1] };
+}
+
+// --------------------------- Charts update ---------------------------
+function pushToCharts(pt){
+  const maxN = 120;
+  const lbl = shortTs(pt.ts);
+  // speed
+  if(speedChart.data.labels.length >= maxN) {
+    speedChart.data.labels.shift();
+    speedChart.data.datasets.forEach(ds=>ds.data.shift());
+  }
+  speedChart.data.labels.push(lbl);
+  speedChart.data.datasets[0].data.push(pt.speed || 0);
+  speedChart.data.datasets[1].data.push(pt._bearing || 0);
+  speedChart.update('none');
+
+  // activity timeline
+  if(activityChart.data.labels.length >= 240){
+    activityChart.data.labels.shift();
+    activityChart.data.datasets[0].data.shift();
+    activityChart.data.datasets[0].backgroundColor.shift();
+  }
+  activityChart.data.labels.push(lbl);
+  activityChart.data.datasets[0].data.push(1);
+  activityChart.data.datasets[0].backgroundColor.push(activityColor[pt.activity] || '#888');
+  activityChart.update('none');
+}
+
+// --------------------------- Main recording loop ---------------------------
+let recInterval = null;
+async function startRecording(){
+  if(recording) return;
+  recording = true;
+  currentTrackId = uuid();
+  currentPolyline = null; currentMarker = null; prevPoint = null;
+  document.getElementById('startRec').disabled = true;
+  document.getElementById('stopRec').disabled = false;
+  // add empty track
+  await db.setItem(currentTrackId, []);
+  allTracks[currentTrackId] = [];
+  addTrackListItem(currentTrackId, palette[Object.keys(allTracks).length % palette.length], 0);
+  // loop
+  recInterval = setInterval(async ()=>{
+    try{
+      const pos = await new Promise((resolve, reject)=>{
+        navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy:true, maximumAge:1000, timeout:5000 });
+      });
+      const pt = { lat: pos.coords.latitude, lon: pos.coords.longitude, ts: Date.now(), speed: (pos.coords.speed||0)*3.6 };
+      pt.activity = classifyActivity(pt.speed);
+      // push to storage
+      await savePoint(currentTrackId, pt);
+      // update charts & checks
+      pushToCharts(pt);
+    }catch(err){
+      // ignore errors (permission or timeout)
+      console.warn('geo err', err);
+    }
+  }, 2000);
+}
+
+async function stopRecording(){
+  if(!recording) return;
+  recording = false;
+  clearInterval(recInterval);
+  document.getElementById('startRec').disabled = false;
+  document.getElementById('stopRec').disabled = true;
+  // finalize: draw full track
+  await loadAllTracks();
+  showAlert('Recording stopped');
+}
+
+// --------------------------- Simple helpers for UI actions ---------------------------
+window.playTrack = function(tid){
+  const pts = allTracks[tid];
+  if(!pts || !pts.length) return alert('No points');
+  // center first
+  map.setView([pts[0].lat, pts[0].lon], 16);
+  // animate
+  let i=0;
+  const marker = L.marker([pts[0].lat, pts[0].lon]).addTo(map);
+  const poly = L.polyline([], {color:'#000', weight:4}).addTo(map);
+  const iv = setInterval(()=>{
+    if(i >= pts.length){ clearInterval(iv); return; }
+    poly.addLatLng([pts[i].lat, pts[i].lon]);
+    marker.setLatLng([pts[i].lat, pts[i].lon]);
+    pushToCharts(pts[i]);
+    i++;
+  }, 350);
+};
+
+window.toggleVisibility = function(tid){
+  visibility[tid] = !visibility[tid];
+  if(polylineMap[tid]){
+    if(visibility[tid]) polylineMap[tid].addTo(map); else map.removeLayer(polylineMap[tid]);
+  }
+  if(segmentMap[tid]) segmentMap[tid].forEach(s => visibility[tid] ? s.addTo(map) : map.removeLayer(s));
+};
+
+window.exportTrackCSV = exportTrackCSV;
+window.exportTrackGPX = exportTrackGPX;
+window.deleteTrack = deleteTrack;
+
+// --------------------------- UI wiring ---------------------------
+document.getElementById('startRec').addEventListener('click', startRecording);
+document.getElementById('stopRec').addEventListener('click', stopRecording);
+document.getElementById('addGeofence').addEventListener('click', ()=>{
+  const lat = parseFloat(document.getElementById('gfLat').value);
+  const lon = parseFloat(document.getElementById('gfLon').value);
+  const rad = parseFloat(document.getElementById('gfRad').value);
+  if(Number.isFinite(lat) && Number.isFinite(lon) && Number.isFinite(rad)){
+    addGeofence(lat, lon, rad);
+  } else alert('Enter valid lat/lon/radius');
 });
+document.getElementById('showAll').addEventListener('click', ()=>{
+  Object.keys(polylineMap).forEach(k=>polylineMap[k].addTo(map));
+  Object.keys(segmentMap).forEach(k=>segmentMap[k].forEach(s=>s.addTo(map)));
+});
+document.getElementById('hideAll').addEventListener('click', ()=>{
+  Object.keys(polylineMap).forEach(k=>map.removeLayer(polylineMap[k]));
+  Object.keys(segmentMap).forEach(k=>segmentMap[k].forEach(s=>map.removeLayer(s)));
+});
+document.getElementById('exportAll').addEventListener('click', async ()=>{
+  let csv = 'track,lat,lon,ts,speed,activity\n';
+  for(const tid of Object.keys(allTracks)){
+    (allTracks[tid]||[]).forEach(p=> csv += `${tid},${p.lat},${p.lon},${p.ts},${p.speed||''},${p.activity||''}\n`);
+  }
+  const blob = new Blob([csv], { type:'text/csv' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'all_tracks.csv'; a.click();
+});
+document.getElementById('clearAll').addEventListener('click', async ()=>{
+  if(!confirm('Delete ALL tracks?')) return;
+  await db.clear(); allTracks={}; clearAllPolylines(); document.getElementById('trackList').innerHTML=''; showAlert('All cleared');
+});
+document.getElementById('collapseBtn').addEventListener('click', ()=>{
+  document.getElementById('sidebar').classList.toggle('collapsed');
+  setTimeout(()=>map.invalidateSize(), 280);
+});
+document.getElementById('trainAI').addEventListener('click', ()=>trainPredictor());
+
+// --------------------------- Persist geofences on load ---------------------------
+(async function startup(){
+  // init map & charts
+  initMap();
+  initCharts();
+  // load geofences
+  const saved = await db.getItem('__geofences__');
+  if(saved && Array.isArray(saved)){
+    saved.forEach(g=> addGeofence(g.lat, g.lon, g.radius));
+  }
+  // load tracks
+  await loadAllTracks();
+  // ensure UI sized
+  setTimeout(()=>{ map.invalidateSize(); speedChart.update(); activityChart.update(); }, 400);
+})();
+
+// --------------------------- Helper: add track list item when recording starts -----------
+function addTrackListItem(tid, color, count){
+  // create item if not exists
+  if(document.getElementById('item_'+tid)) return;
+  const container = document.getElementById('trackList');
+  const div = document.createElement('div'); div.className='track-item'; div.id='item_'+tid;
+  div.innerHTML = `<div class="track-meta"><span class="track-color" style="background:${color}"></span><div style="font-size:0.95rem">${tid}<div style="font-size:0.8rem;color:#64748b">${count} pts</div></div></div>
+    <div style="display:flex;gap:6px;align-items:center">
+      <button onclick="playTrack('${tid}')">▶</button>
+      <button onclick="exportTrackCSV('${tid}')">CSV</button>
+      <button onclick="exportTrackGPX('${tid}')">GPX</button>
+      <button onclick="toggleVisibility('${tid}')">👁</button>
+      <button onclick="deleteTrack('${tid}')">🗑</button>
+    </div>`;
+  container.prepend(div);
+}
+
+// --------------------------- Small simulator (for testing without real GPS) -----------
+window.simulateTrack = async function(centerLat=-26.2, centerLon=28.0, n=120, step=0.0006){
+  // create synthetic circular-ish track
+  const tid = 'sim_'+Date.now();
+  const pts = [];
+  for(let i=0;i<n;i++){
+    const angle = (i/n)*Math.PI*2;
+    const lat = centerLat + Math.sin(angle)*0.005;
+    const lon = centerLon + Math.cos(angle)*0.005;
+    const speed = 15 + 10*Math.abs(Math.sin(angle));
+    const p = { lat, lon, ts: Date.now() + i*2000, speed, activity: classifyActivity(speed) };
+    pts.push(p);
+  }
+  await db.setItem(tid, pts);
+  allTracks[tid] = pts;
+  drawFullTrack(tid, palette[Object.keys(allTracks).length % palette.length]);
+  addTrackListItem(tid, palette[Object.keys(allTracks).length % palette.length], pts.length);
+  showAlert('Simulated track added');
+};
+
+// --------------------------- End of script ---------------------------
 </script>
 </body>
 </html>
