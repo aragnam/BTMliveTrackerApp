@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>BTM Live Tracker Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/localforage/1.10.0/localforage.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  font-family: Arial, sans-serif;
+  display: flex; flex-direction: column;
+}
+#map { flex: 1; min-height: 60vh; }
+#sidebar {
+  background: #fafafa; padding: 10px;
+  border-bottom: 1px solid #ccc;
+  overflow-x: auto; white-space: nowrap;
+}
+button { padding: 8px 12px; font-size: 1rem; margin: 3px; border-radius: 5px; }
+#charts { display: flex; flex-direction: column; padding: 5px; }
+canvas { background: #fff; border: 1px solid #ccc; margin: 5px 0; border-radius: 8px; }
+.legend {
+  position: absolute; bottom: 10px; left: 10px;
+  background: #fff; padding: 5px; font-size: 0.8rem;
+  border: 1px solid #ccc; border-radius: 5px;
+  z-index: 1000;
+}
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <button id="startBtn">Start Recording</button>
+  <button id="stopBtn" disabled>Stop</button>
+  <button id="showTracksBtn">Show Tracks</button>
+  <span id="statusMsg"></span>
+</div>
+
+<div id="map"></div>
+
+<div id="charts">
+  <canvas id="speedChart" height="80"></canvas>
+  <canvas id="headingChart" height="80"></canvas>
+  <canvas id="activityTimeline" height="60"></canvas>
+</div>
+
+<div class="legend">
+  <b>Colors:</b> <span style="color:green">Walking</span>,
+  <span style="color:orange">Running</span>,
+  <span style="color:blue">Cycling</span>,
+  <span style="color:red">Driving</span>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  // Initialize map safely after DOM
+  const map = L.map('map').setView([0,0], 2);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution:'&copy; OpenStreetMap'
+  }).addTo(map);
+  setTimeout(()=>map.invalidateSize(), 300);
+
+  const db = localforage.createInstance({ name: 'BTMLive', storeName: 'tracks' });
+
+  let recording = false, trackId = null, trackData = [], polyline=null, marker=null, prev=null;
+
+  const colors = { walking:'green', running:'orange', cycling:'blue', driving:'red' };
+
+  const speedChart = new Chart(document.getElementById('speedChart'), {
+    type:'line',
+    data:{ labels:[], datasets:[{label:'Speed (km/h)', data:[], borderColor:'blue', tension:0.2 }]},
+    options:{ animation:false, scales:{x:{display:false}, y:{beginAtZero:true}}}
+  });
+  const headingChart = new Chart(document.getElementById('headingChart'), {
+    type:'line',
+    data:{ labels:[], datasets:[{label:'Heading (°)', data:[], borderColor:'orange', tension:0.2 }]},
+    options:{ animation:false, scales:{x:{display:false}, y:{min:0,max:360}}}
+  });
+  const activityTimeline = new Chart(document.getElementById('activityTimeline'), {
+    type:'bar',
+    data:{ labels:[], datasets:[{label:'Activity', data:[], backgroundColor:[] }]},
+    options:{ animation:false, scales:{x:{display:false}, y:{display:false}}}
+  });
+
+  function classify(speed){
+    if(speed<6) return 'walking';
+    if(speed<15) return 'running';
+    if(speed<30) return 'cycling';
+    return 'driving';
+  }
+
+  function getBearing(p1,p2){
+    const toRad=x=>x*Math.PI/180, toDeg=x=>x*180/Math.PI;
+    const y=Math.sin(toRad(p2.lon-p1.lon))*Math.cos(toRad(p2.lat));
+    const x=Math.cos(toRad(p1.lat))*Math.sin(toRad(p2.lat)) -
+             Math.sin(toRad(p1.lat))*Math.cos(toRad(p2.lat))*Math.cos(toRad(p2.lon-p1.lon));
+    return (toDeg(Math.atan2(y,x))+360)%360;
+  }
+
+  async function recordPoint(){
+    if(!recording) return;
+    navigator.geolocation.getCurrentPosition(async pos=>{
+      const lat=pos.coords.latitude, lon=pos.coords.longitude, spd=(pos.coords.speed||0)*3.6;
+      const act=classify(spd);
+      const point={lat, lon, ts:Date.now(), speed:spd, activity:act};
+      if(prev){
+        point.heading=getBearing(prev, point);
+        const dist = haversine(prev, point);
+        if(dist>0.5){
+          trackData.push(point);
+          polyline.addLatLng([lat, lon]);
+          marker.setLatLng([lat, lon]);
+          map.setView([lat, lon], 17);
+          await db.setItem(trackId, trackData);
+          updateCharts(point);
+        }
+      } else {
+        polyline=L.polyline([[lat,lon]],{color:colors[act]}).addTo(map);
+        marker=L.marker([lat,lon]).addTo(map);
+      }
+      prev=point;
+    });
+  }
+
+  function haversine(p1,p2){
+    const R=6371e3;
+    const toRad=x=>x*Math.PI/180;
+    const dLat=toRad(p2.lat-p1.lat), dLon=toRad(p2.lon-p1.lon);
+    const a=Math.sin(dLat/2)**2+Math.cos(toRad(p1.lat))*Math.cos(toRad(p2.lat))*Math.sin(dLon/2)**2;
+    return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+  }
+
+  function updateCharts(point){
+    const label = new Date(point.ts).toLocaleTimeString();
+    if(speedChart.data.labels.length>120){ speedChart.data.labels.shift(); speedChart.data.datasets[0].data.shift(); }
+    speedChart.data.labels.push(label);
+    speedChart.data.datasets[0].data.push(point.speed);
+    speedChart.update();
+
+    if(headingChart.data.labels.length>120){ headingChart.data.labels.shift(); headingChart.data.datasets[0].data.shift(); }
+    headingChart.data.labels.push(label);
+    headingChart.data.datasets[0].data.push(point.heading||0);
+    headingChart.update();
+
+    if(activityTimeline.data.labels.length>120){ activityTimeline.data.labels.shift(); activityTimeline.data.datasets[0].data.shift(); activityTimeline.data.datasets[0].backgroundColor.shift(); }
+    activityTimeline.data.labels.push(label);
+    activityTimeline.data.datasets[0].data.push(1);
+    activityTimeline.data.datasets[0].backgroundColor.push(colors[point.activity]);
+    activityTimeline.update();
+  }
+
+  let recInterval=null;
+  document.getElementById('startBtn').onclick=()=>{
+    recording=true;
+    trackId='track_'+new Date().toISOString();
+    trackData=[];
+    prev=null;
+    document.getElementById('statusMsg').textContent='Recording...';
+    document.getElementById('startBtn').disabled=true;
+    document.getElementById('stopBtn').disabled=false;
+    recInterval=setInterval(recordPoint, 3000);
+  };
+  document.getElementById('stopBtn').onclick=()=>{
+    recording=false;
+    clearInterval(recInterval);
+    document.getElementById('statusMsg').textContent='Stopped';
+    document.getElementById('startBtn').disabled=false;
+    document.getElementById('s
