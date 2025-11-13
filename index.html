@@ -101,7 +101,6 @@ canvas{width:100% !important;height:160px !important}
 </div>
 
 <script>
-// --------------------------- Utilities & Storage ---------------------------
 const db = localforage.createInstance({ name:'BTM_Tracker', storeName:'tracks' });
 
 function toRad(v){ return v * Math.PI / 180; }
@@ -124,547 +123,232 @@ function classifyActivity(speedKmh){
   if(speedKmh < 30) return 'cycling';
   return 'driving';
 }
-function shortTs(ts){
-  return new Date(ts).toLocaleTimeString();
-}
+function shortTs(ts){ return new Date(ts).toLocaleTimeString(); }
 function uuid(){ return 't_'+Date.now()+'_'+Math.random().toString(36).slice(2,8); }
 
-// --------------------------- Map init & sizing fix ---------------------------
+// --------------------------- Map ---------------------------
 let map, baseLayer;
 function initMap(){
   map = L.map('map', { preferCanvas:true }).setView([0,0], 2);
   baseLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap contributors'
   }).addTo(map);
-  // ensure tile load and correct sizing
   setTimeout(()=>map.invalidateSize(), 300);
   window.addEventListener('resize', ()=> map.invalidateSize());
 }
-
-// --------------------------- State ---------------------------
-let recording=false;
-let currentTrackId=null;
-let currentPolyline=null;
-let currentMarker=null;
-let prevPoint=null;
-let allTracks = {}; // tid -> [points]
-let polylineMap = {}; // tid -> base polyline
-let segmentMap = {}; // tid -> [activity segment polylines]
-let visibility = {}; // tid -> boolean
-let alertMarkers = [];
-let geofences = []; // {lat,lon,radius,leafletCircle}
-let predictorModel = null;
-let predictorReady = false;
-
-// color map for activity
-const activityColor = { walking:'#16a34a', running:'#f97316', cycling:'#2563eb', driving:'#dc2626' };
-const palette = ['#1f77b4','#9467bd','#8c564b','#e377c2','#17becf','#7f7f7f'];
 
 // --------------------------- Charts ---------------------------
 let speedChart, activityChart;
 function initCharts(){
   const ctxSpeed = document.getElementById('speedChart').getContext('2d');
-  speedChart = new Chart(ctxSpeed, {
-    type:'line',
-    data:{ labels:[], datasets:[
-      { label:'Speed (km/h)', data:[], borderColor:'#ef4444', yAxisID:'y1', tension:0.2, fill:true, backgroundColor:'rgba(239,68,68,0.08)' },
-      { label:'Heading (°)', data:[], borderColor:'#06b6d4', yAxisID:'y2', tension:0.2, fill:false }
-    ]},
-    options:{ animation:false, scales:{ y1:{ position:'left', beginAtZero:true }, y2:{ position:'right', min:0, max:360 } } }
-  });
+  speedChart = new Chart(ctxSpeed, { type:'line', data:{ labels:[], datasets:[
+    { label:'Speed (km/h)', data:[], borderColor:'#ef4444', yAxisID:'y1', tension:0.2, fill:true, backgroundColor:'rgba(239,68,68,0.08)' },
+    { label:'Heading (°)', data:[], borderColor:'#06b6d4', yAxisID:'y2', tension:0.2, fill:false }
+  ]}, options:{ animation:false, scales:{ y1:{ position:'left', beginAtZero:true }, y2:{ position:'right', min:0, max:360 } } } });
 
   const ctxAct = document.getElementById('activityChart').getContext('2d');
-  activityChart = new Chart(ctxAct, {
-    type:'bar',
-    data:{ labels:[], datasets:[{ label:'activity', data:[], backgroundColor:[] }] },
-    options:{ animation:false, plugins:{ legend:{ display:false } }, scales:{ x:{ display:false }, y:{ display:false } } }
-  });
+  activityChart = new Chart(ctxAct, { type:'bar', data:{ labels:[], datasets:[{ label:'activity', data:[], backgroundColor:[] }] },
+    options:{ animation:false, plugins:{ legend:{ display:false } }, scales:{ x:{ display:false }, y:{ display:false } } } });
 }
 
-// --------------------------- UI helpers ---------------------------
+// --------------------------- Alerts ---------------------------
+let alertMarkers = [];
 function showAlert(msg, latlng){
   const el = document.getElementById('alerts');
   el.textContent = msg;
-  setTimeout(()=>{ if(el.textContent === msg) el.textContent = ''; }, 6000);
+  setTimeout(()=>{ if(el.textContent===msg) el.textContent=''; },6000);
   if(latlng && map){
-    const mk = L.marker(latlng, { title: msg }).bindPopup(msg).addTo(map);
-    alertMarkers.push(mk);
-  } else if(currentMarker){
-    const mk = L.marker(currentMarker.getLatLng(), { title: msg }).bindPopup(msg).addTo(map);
+    const mk = L.marker(latlng,{title:msg}).bindPopup(msg).addTo(map);
     alertMarkers.push(mk);
   }
 }
-function clearAlerts(){
-  alertMarkers.forEach(m => map.removeLayer(m));
-  alertMarkers = [];
-  document.getElementById('alerts').textContent = '';
+function clearAlerts(){ alertMarkers.forEach(m=>map.removeLayer(m)); alertMarkers=[]; document.getElementById('alerts').textContent=''; }
+
+// --------------------------- Tracks ---------------------------
+let recording=false, currentTrackId=null, currentPolyline=null, currentMarker=null, prevPoint=null;
+let allTracks = {}, polylineMap = {}, segmentMap = {}, visibility={}, geofences=[];
+const activityColor = { walking:'#16a34a', running:'#f97316', cycling:'#2563eb', driving:'#dc2626' };
+const palette = ['#1f77b4','#9467bd','#8c564b','#e377c2','#17becf','#7f7f7f'];
+
+function drawLivePoint(pt){
+  if(!currentMarker) currentMarker = L.marker([pt.lat, pt.lon]).addTo(map);
+  else currentMarker.setLatLng([pt.lat, pt.lon]);
+  if(!currentPolyline) currentPolyline = L.polyline([[pt.lat,pt.lon]], {color:'#000',weight:4}).addTo(map);
+  else currentPolyline.addLatLng([pt.lat, pt.lon]);
 }
 
-// --------------------------- Track storage & rendering ---------------------------
-async function savePoint(trackId, point){
-  const arr = (await db.getItem(trackId)) || [];
-  arr.push(point);
-  await db.setItem(trackId, arr);
-  allTracks[trackId] = arr;
-  // render live
-  if(currentTrackId === trackId){
-    drawLivePoint(point);
-  }
-  // update track list (counts)
-  refreshTrackList();
-}
-
-async function loadAllTracks(){
-  allTracks = {};
-  await db.iterate((value, key)=>{ if(key !== '__geofences__') allTracks[key] = value; });
-  // draw all
-  clearAllPolylines();
-  let i=0;
-  for(const tid of Object.keys(allTracks)){
-    const color = palette[i % palette.length]; i++;
-    visibility[tid] = true;
-    drawFullTrack(tid, color);
-    addTrackListItem(tid, color, allTracks[tid].length);
-  }
-  map.invalidateSize();
+function drawFullTrack(tid,color){
+  const pts = allTracks[tid];
+  if(!pts || !pts.length) return;
+  if(polylineMap[tid]) map.removeLayer(polylineMap[tid]);
+  const latlngs = pts.map(p=>[p.lat,p.lon]);
+  const poly = L.polyline(latlngs,{color}).addTo(map);
+  polylineMap[tid] = poly;
 }
 
 function clearAllPolylines(){
   Object.values(polylineMap).forEach(p=>map.removeLayer(p));
-  polylineMap = {};
   Object.values(segmentMap).flat().forEach(s=>map.removeLayer(s));
-  segmentMap = {};
+  polylineMap={}; segmentMap={};
 }
 
-// Draw entire track with activity-colored segments
-function drawFullTrack(tid, baseColor){
-  const pts = allTracks[tid] || [];
-  if(!pts.length) return;
-  // build segments by activity
-  const segments = [];
-  let curAct = pts[0].activity || classifyActivity(pts[0].speed||0);
-  let curPts = [pts[0]];
-  for(let i=1;i<pts.length;i++){
-    const a = pts[i].activity || classifyActivity(pts[i].speed||0);
-    if(a === curAct){ curPts.push(pts[i]); }
-    else { segments.push({activity:curAct, pts:curPts}); curAct = a; curPts=[pts[i]]; }
-  }
-  segments.push({activity:curAct, pts:curPts});
-  // draw segments
-  const segLayers = [];
-  segments.forEach(seg=>{
-    if(seg.pts.length>1){
-      const coords = seg.pts.map(p=>[p.lat,p.lon]);
-      const poly = L.polyline(coords, { color: activityColor[seg.activity] || baseColor, weight:4, opacity:0.9 }).addTo(map);
-      segLayers.push(poly);
-    }
-  });
-  segmentMap[tid] = segLayers;
-  // base polyline (thin) for click toggling
-  const baseCoords = pts.map(p=>[p.lat,p.lon]);
-  const base = L.polyline(baseCoords, { color: baseColor, weight:2, opacity:0.6 }).addTo(map);
-  base.on('click', ()=>{ visibility[tid] = !visibility[tid]; toggleVisibility(tid); });
-  polylineMap[tid] = base;
-}
-
-function drawLivePoint(point){
-  if(!currentPolyline){
-    currentPolyline = L.polyline([], { color: activityColor[point.activity] || '#1f77b4', weight:4 }).addTo(map);
-  }
-  currentPolyline.addLatLng([point.lat, point.lon]);
-  if(!currentMarker) currentMarker = L.marker([point.lat, point.lon]).addTo(map);
-  else currentMarker.setLatLng([point.lat, point.lon]);
-}
-
-// --------------------------- Track list UI ---------------------------
-function addTrackListItem(tid, color, count){
-  // avoid duplicates
-  if(document.getElementById('item_'+tid)) return;
-  const list = document.getElementById('trackList');
-  const div = document.createElement('div'); div.className = 'track-item'; div.id = 'item_'+tid;
-  div.innerHTML = `<div class="track-meta"><span class="track-color" style="background:${color}"></span><div style="font-size:0.95rem">${tid}<div style="font-size:0.8rem;color:#64748b">${count} pts</div></div></div>
-    <div style="display:flex;gap:6px;align-items:center">
-      <button onclick="playTrack('${tid}')" title="Play">▶</button>
-      <button onclick="exportTrackCSV('${tid}')" title="CSV">CSV</button>
-      <button onclick="exportTrackGPX('${tid}')" title="GPX">GPX</button>
-      <button onclick="toggleVisibility('${tid}')" title="Toggle">👁</button>
-      <button onclick="deleteTrack('${tid}')" title="Delete">🗑️</button>
-    </div>`;
-  list.prepend(div);
-}
-
-function refreshTrackList(){
-  // update counts and ensure list matches allTracks
-  const list = document.getElementById('trackList');
-  list.innerHTML = '';
-  let i=0;
-  for(const tid of Object.keys(allTracks).sort().reverse()){
-    const cnt = allTracks[tid].length;
-    const color = palette[i % palette.length]; i++;
-    addTrackListItem(tid, color, cnt);
-  }
-}
-
-// --------------------------- Visibility / toggles ---------------------------
-function toggleVisibility(tid){
-  if(!polylineMap[tid]) return;
-  visibility[tid] = !visibility[tid];
-  if(visibility[tid]){
-    polylineMap[tid].addTo(map);
-    (segmentMap[tid]||[]).forEach(s=>s.addTo(map));
-  } else {
-    map.removeLayer(polylineMap[tid]);
-    (segmentMap[tid]||[]).forEach(s=>map.removeLayer(s));
-  }
-}
-
-// --------------------------- Export / Delete ---------------------------
-async function exportTrackCSV(tid){
-  const pts = allTracks[tid];
-  if(!pts) return alert('No points');
-  let csv = 'lat,lon,ts,speed,activity\n';
-  pts.forEach(p => csv += `${p.lat},${p.lon},${p.ts},${p.speed||''},${p.activity||''}\n`);
-  const blob = new Blob([csv], { type:'text/csv' });
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${tid}.csv`; a.click();
-}
-async function exportTrackGPX(tid){
-  const pts = allTracks[tid];
-  if(!pts) return alert('No points');
-  const geojson = { type:'FeatureCollection', features: pts.map(p=>({ type:'Feature', geometry:{type:'Point', coordinates:[p.lon,p.lat]}, properties:{ts:p.ts,speed:p.speed,activity:p.activity} })) };
-  const gpx = togpx(geojson, { creator:'BTMLiveTracker' });
-  const blob = new Blob([gpx], { type:'application/gpx+xml' });
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${tid}.gpx`; a.click();
-}
-async function deleteTrack(tid){
-  if(!confirm('Delete '+tid+'?')) return;
-  await db.removeItem(tid);
-  // remove from map
-  if(polylineMap[tid]) { map.removeLayer(polylineMap[tid]); delete polylineMap[tid]; }
-  if(segmentMap[tid]) { segmentMap[tid].forEach(s=>map.removeLayer(s)); delete segmentMap[tid]; }
-  delete allTracks[tid];
-  document.getElementById('item_'+tid)?.remove();
-}
-
-// --------------------------- Geofence functions ---------------------------
-function renderGeofenceUI(){
-  const el = document.getElementById('geofenceList');
-  el.innerHTML = geofences.map((g,i)=>`G${i+1}: ${g.lat.toFixed(4)}, ${g.lon.toFixed(4)} (r=${g.radius}m)`).join('<br>');
-}
-function addGeofence(lat,lon,radius){
-  const circle = L.circle([lat,lon], { radius, color:'#f59e0b', weight:1 }).addTo(map);
-  geofences.push({lat,lon,radius,leaflet:circle});
-  renderGeofenceUI();
-  // persist geofences
-  db.setItem('__geofences__', geofences.map(g=>({lat:g.lat,lon:g.lon,radius:g.radius})));
-}
-function checkGeofencesForPoint(pt){
-  geofences.forEach(g=>{
-    const inside = haversine(pt, {lat:g.lat, lon:g.lon}) <= g.radius;
-    if(!inside) showAlert('⚠️ Left geofence', [pt.lat, pt.lon]);
-  });
-}
-
-// --------------------------- Anomaly detection ---------------------------
-function detectAnomalies(point){
-  // sudden speed jump
-  if(prevPoint){
-    const ds = (point.speed||0) - (prevPoint.speed||0);
-    if(ds > 20) showAlert(`⚠️ Sudden speed increase +${ds.toFixed(1)} km/h`, [point.lat, point.lon]);
-    // sharp turn detection using last bearing
-    if(prevPoint._bearing !== undefined){
-      const bPrev = prevPoint._bearing;
-      const bCur = bearing(prevPoint, point);
-      const diff = Math.abs(((bCur - bPrev + 540) % 360) - 180);
-      if(diff > 90) showAlert('⚠️ Sharp turn detected', [point.lat, point.lon]);
-    }
-    point._bearing = bearing(prevPoint, point);
-    // route deviation using nearest distance to historical points
-    for(const histId of Object.keys(allTracks)){
-      const hist = allTracks[histId];
-      if(!hist || hist.length < 10) continue;
-      // sample hist
-      let minD = Infinity;
-      for(let i=0;i<hist.length;i+=Math.max(1, Math.floor(hist.length/60))){
-        const d = haversine(point, hist[i]);
-        if(d < minD) minD = d;
-        if(minD < 50) break;
-      }
-      if(minD > 150){ showAlert('⚠️ Route deviation detected', [point.lat, point.lon]); break; }
-    }
-  }
-  prevPoint = point;
-}
-
-// --------------------------- AI Predictor (TF.js) ---------------------------
-/*
- Simple model: predict next lat & lon from last 3 (lat,lon,speed) flattened.
- Training data: sliding windows from stored tracks (if enough data).
- If prediction error (haversine) > threshold => alert.
-*/
-async function trainPredictor(){
-  // collect windows
-  const X = []; const Y = [];
-  for(const tid of Object.keys(allTracks)){
-    const pts = allTracks[tid];
-    if(pts.length < 10) continue;
-    for(let i=3;i<pts.length;i++){
-      const prev3 = pts.slice(i-3,i);
-      const input = [];
-      prev3.forEach(p=>{ input.push(p.lat, p.lon, p.speed||0); });
-      X.push(input);
-      Y.push([pts[i].lat, pts[i].lon]);
-    }
-  }
-  if(X.length < 50){ alert('Not enough data to train predictor (need ~50 windows).'); return; }
-  // build tensors
-  const xs = tf.tensor2d(X);
-  const ys = tf.tensor2d(Y);
-  // simple dense model
-  const model = tf.sequential();
-  model.add(tf.layers.dense({ inputShape:[X[0].length], units:64, activation:'relu' }));
-  model.add(tf.layers.dense({ units:32, activation:'relu' }));
-  model.add(tf.layers.dense({ units:2 })); // lat, lon
-  model.compile({ optimizer:'adam', loss:'meanSquaredError' });
-  // show training UI
-  showAlert('Training predictor (this may take a few seconds)...');
-  await model.fit(xs, ys, { epochs:25, batchSize:64, callbacks:{
-    onEpochEnd: (epoch, logs) => { /* optional progress */ }
-  }});
-  predictorModel = model;
-  predictorReady = true;
-  showAlert('Predictor trained — enabled');
-  xs.dispose(); ys.dispose();
-}
-
-// use predictor on live stream
-async function predictNext(ptSequence){
-  if(!predictorReady || !predictorModel) return null;
-  // ptSequence: last 3 points [{lat,lon,speed},...]
-  if(ptSequence.length < 3) return null;
-  const input = [];
-  ptSequence.slice(-3).forEach(p=>{ input.push(p.lat, p.lon, p.speed || 0); });
-  const t = tf.tensor2d([input]);
-  const pred = predictorModel.predict(t);
-  const arr = await pred.array();
-  t.dispose(); pred.dispose();
-  return { lat: arr[0][0], lon: arr[0][1] };
-}
-
-// --------------------------- Charts update ---------------------------
-function pushToCharts(pt){
-  const maxN = 120;
-  const lbl = shortTs(pt.ts);
-  // speed
-  if(speedChart.data.labels.length >= maxN) {
-    speedChart.data.labels.shift();
-    speedChart.data.datasets.forEach(ds=>ds.data.shift());
-  }
-  speedChart.data.labels.push(lbl);
-  speedChart.data.datasets[0].data.push(pt.speed || 0);
-  speedChart.data.datasets[1].data.push(pt._bearing || 0);
-  speedChart.update('none');
-
-  // activity timeline
-  if(activityChart.data.labels.length >= 240){
-    activityChart.data.labels.shift();
-    activityChart.data.datasets[0].data.shift();
-    activityChart.data.datasets[0].backgroundColor.shift();
-  }
-  activityChart.data.labels.push(lbl);
-  activityChart.data.datasets[0].data.push(1);
-  activityChart.data.datasets[0].backgroundColor.push(activityColor[pt.activity] || '#888');
-  activityChart.update('none');
-}
-
-// --------------------------- Main recording loop ---------------------------
+// --------------------------- Recording ---------------------------
 let recInterval = null;
 async function startRecording(){
   if(recording) return;
   recording = true;
-  currentTrackId = uuid();
-  currentPolyline = null; currentMarker = null; prevPoint = null;
-  document.getElementById('startRec').disabled = true;
-  document.getElementById('stopRec').disabled = false;
-  // add empty track
+  currentTrackId = uuid(); currentPolyline=null; currentMarker=null; prevPoint=null;
+  document.getElementById('startRec').disabled=true;
+  document.getElementById('stopRec').disabled=false;
   await db.setItem(currentTrackId, []);
   allTracks[currentTrackId] = [];
-  addTrackListItem(currentTrackId, palette[Object.keys(allTracks).length % palette.length], 0);
-  // loop
-  recInterval = setInterval(async ()=>{
+  addTrackListItem(currentTrackId, palette[Object.keys(allTracks).length % palette.length],0);
+  recInterval = setInterval(async()=>{
     try{
-      const pos = await new Promise((resolve, reject)=>{
-        navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy:true, maximumAge:1000, timeout:5000 });
+      const pos = await new Promise((resolve,reject)=>{
+        navigator.geolocation.getCurrentPosition(resolve,reject,{enableHighAccuracy:true,maximumAge:1000,timeout:5000});
       });
-      const pt = { lat: pos.coords.latitude, lon: pos.coords.longitude, ts: Date.now(), speed: (pos.coords.speed||0)*3.6 };
+      const pt = {lat:pos.coords.latitude,lon:pos.coords.longitude,ts:Date.now(),speed:(pos.coords.speed||0)*3.6};
       pt.activity = classifyActivity(pt.speed);
-      // push to storage
-      await savePoint(currentTrackId, pt);
-      // update charts & checks
+      await savePoint(currentTrackId,pt);
       pushToCharts(pt);
-    }catch(err){
-      // ignore errors (permission or timeout)
-      console.warn('geo err', err);
-    }
-  }, 2000);
+    }catch(err){ console.warn('geo err',err); }
+  },2000);
 }
 
-aasync function stopRecording(){
+async function stopRecording(){
   if(!recording) return;
   recording = false;
   clearInterval(recInterval);
-  document.getElementById('startRec').disabled = false;
-  document.getElementById('stopRec').disabled = true;
-  // finalize: draw full track
+  document.getElementById('startRec').disabled=false;
+  document.getElementById('stopRec').disabled=true;
   await loadAllTracks();
   showAlert('Recording stopped');
-  // automatic GPX export
   if(currentTrackId) await exportTrackGPXAuto(currentTrackId);
-  currentTrackId = null;
-  currentPolyline = null;
-  currentMarker = null;
-}
-async function exportTrackGPXAuto(tid){
-  const pts = allTracks[tid];
-  if(!pts || !pts.length) return;
-  const geojson = {
-    type:'FeatureCollection',
-    features: pts.map(p=>({
-      type:'Feature',
-      geometry:{ type:'Point', coordinates:[p.lon,p.lat] },
-      properties:{ ts:p.ts, speed:p.speed, activity:p.activity }
-    }))
-  };
-  const gpx = togpx(geojson, { creator:'BTMLiveTracker' });
-  const blob = new Blob([gpx], { type:'application/gpx+xml' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `${tid}.gpx`;
-  a.click();
-  showAlert(`GPX exported for track ${tid}`);
+  currentTrackId=null; currentPolyline=null; currentMarker=null;
 }
 
-// --------------------------- Simple helpers for UI actions ---------------------------
-window.playTrack = function(tid){
-  const pts = allTracks[tid];
-  if(!pts || !pts.length) return alert('No points');
-  // center first
-  map.setView([pts[0].lat, pts[0].lon], 16);
-  // animate
+// --------------------------- Storage ---------------------------
+async function savePoint(trackId,point){
+  const arr = (await db.getItem(trackId))||[];
+  arr.push(point); await db.setItem(trackId,arr);
+  allTracks[trackId]=arr;
+  if(currentTrackId===trackId) drawLivePoint(point);
+  refreshTrackList();
+}
+
+async function loadAllTracks(){
+  allTracks={};
+  await db.iterate((value,key)=>{ if(key!=='__geofences__') allTracks[key]=value; });
+  clearAllPolylines();
   let i=0;
-  const marker = L.marker([pts[0].lat, pts[0].lon]).addTo(map);
-  const poly = L.polyline([], {color:'#000', weight:4}).addTo(map);
-  const iv = setInterval(()=>{
-    if(i >= pts.length){ clearInterval(iv); return; }
-    poly.addLatLng([pts[i].lat, pts[i].lon]);
-    marker.setLatLng([pts[i].lat, pts[i].lon]);
-    pushToCharts(pts[i]);
-    i++;
-  }, 350);
-};
-
-window.toggleVisibility = function(tid){
-  visibility[tid] = !visibility[tid];
-  if(polylineMap[tid]){
-    if(visibility[tid]) polylineMap[tid].addTo(map); else map.removeLayer(polylineMap[tid]);
-  }
-  if(segmentMap[tid]) segmentMap[tid].forEach(s => visibility[tid] ? s.addTo(map) : map.removeLayer(s));
-};
-
-window.exportTrackCSV = exportTrackCSV;
-window.exportTrackGPX = exportTrackGPX;
-window.deleteTrack = deleteTrack;
-
-// --------------------------- UI wiring ---------------------------
-document.getElementById('startRec').addEventListener('click', startRecording);
-document.getElementById('stopRec').addEventListener('click', stopRecording);
-document.getElementById('addGeofence').addEventListener('click', ()=>{
-  const lat = parseFloat(document.getElementById('gfLat').value);
-  const lon = parseFloat(document.getElementById('gfLon').value);
-  const rad = parseFloat(document.getElementById('gfRad').value);
-  if(Number.isFinite(lat) && Number.isFinite(lon) && Number.isFinite(rad)){
-    addGeofence(lat, lon, rad);
-  } else alert('Enter valid lat/lon/radius');
-});
-document.getElementById('showAll').addEventListener('click', ()=>{
-  Object.keys(polylineMap).forEach(k=>polylineMap[k].addTo(map));
-  Object.keys(segmentMap).forEach(k=>segmentMap[k].forEach(s=>s.addTo(map)));
-});
-document.getElementById('hideAll').addEventListener('click', ()=>{
-  Object.keys(polylineMap).forEach(k=>map.removeLayer(polylineMap[k]));
-  Object.keys(segmentMap).forEach(k=>segmentMap[k].forEach(s=>map.removeLayer(s)));
-});
-document.getElementById('exportAll').addEventListener('click', async ()=>{
-  let csv = 'track,lat,lon,ts,speed,activity\n';
   for(const tid of Object.keys(allTracks)){
-    (allTracks[tid]||[]).forEach(p=> csv += `${tid},${p.lat},${p.lon},${p.ts},${p.speed||''},${p.activity||''}\n`);
+    const color = palette[i % palette.length]; i++;
+    visibility[tid]=true;
+    drawFullTrack(tid,color);
+    addTrackListItem(tid,color,allTracks[tid].length);
   }
-  const blob = new Blob([csv], { type:'text/csv' });
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'all_tracks.csv'; a.click();
-});
-document.getElementById('clearAll').addEventListener('click', async ()=>{
-  if(!confirm('Delete ALL tracks?')) return;
-  await db.clear(); allTracks={}; clearAllPolylines(); document.getElementById('trackList').innerHTML=''; showAlert('All cleared');
-});
-document.getElementById('collapseBtn').addEventListener('click', ()=>{
-  document.getElementById('sidebar').classList.toggle('collapsed');
-  setTimeout(()=>map.invalidateSize(), 280);
-});
-document.getElementById('trainAI').addEventListener('click', ()=>trainPredictor());
+  map.invalidateSize();
+}
 
-// --------------------------- Persist geofences on load ---------------------------
-(async function startup(){
-  // init map & charts
-  initMap();
-  initCharts();
-  // load geofences
-  const saved = await db.getItem('__geofences__');
-  if(saved && Array.isArray(saved)){
-    saved.forEach(g=> addGeofence(g.lat, g.lon, g.radius));
-  }
-  // load tracks
-  await loadAllTracks();
-  // ensure UI sized
-  setTimeout(()=>{ map.invalidateSize(); speedChart.update(); activityChart.update(); }, 400);
-})();
-
-// --------------------------- Helper: add track list item when recording starts -----------
-function addTrackListItem(tid, color, count){
-  // create item if not exists
+// --------------------------- Track List UI ---------------------------
+function addTrackListItem(tid,color,count){
   if(document.getElementById('item_'+tid)) return;
   const container = document.getElementById('trackList');
   const div = document.createElement('div'); div.className='track-item'; div.id='item_'+tid;
-  div.innerHTML = `<div class="track-meta"><span class="track-color" style="background:${color}"></span><div style="font-size:0.95rem">${tid}<div style="font-size:0.8rem;color:#64748b">${count} pts</div></div></div>
-    <div style="display:flex;gap:6px;align-items:center">
-      <button onclick="playTrack('${tid}')">▶</button>
-      <button onclick="exportTrackCSV('${tid}')">CSV</button>
-      <button onclick="exportTrackGPX('${tid}')">GPX</button>
-      <button onclick="toggleVisibility('${tid}')">👁</button>
-      <button onclick="deleteTrack('${tid}')">🗑</button>
-    </div>`;
+  div.innerHTML = `<div class="track-meta"><span class="track-color" style="background:${color}"></span>
+  <div style="font-size:0.95rem">${tid}<div style="font-size:0.8rem;color:#64748b">${count} pts</div></div></div>
+  <div style="display:flex;gap:6px;align-items:center">
+    <button onclick="playTrack('${tid}')">▶</button>
+    <button onclick="exportTrackCSV('${tid}')">CSV</button>
+    <button onclick="exportTrackGPX('${tid}')">GPX</button>
+    <button onclick="toggleVisibility('${tid}')">👁</button>
+    <button onclick="deleteTrack('${tid}')">🗑</button>
+  </div>`;
   container.prepend(div);
 }
 
-// --------------------------- Small simulator (for testing without real GPS) -----------
-window.simulateTrack = async function(centerLat=-26.2, centerLon=28.0, n=120, step=0.0006){
-  // create synthetic circular-ish track
-  const tid = 'sim_'+Date.now();
-  const pts = [];
-  for(let i=0;i<n;i++){
-    const angle = (i/n)*Math.PI*2;
-    const lat = centerLat + Math.sin(angle)*0.005;
-    const lon = centerLon + Math.cos(angle)*0.005;
-    const speed = 15 + 10*Math.abs(Math.sin(angle));
-    const p = { lat, lon, ts: Date.now() + i*2000, speed, activity: classifyActivity(speed) };
-    pts.push(p);
+function refreshTrackList(){
+  const list=document.getElementById('trackList'); list.innerHTML='';
+  let i=0;
+  for(const tid of Object.keys(allTracks).sort().reverse()){
+    const cnt = allTracks[tid].length;
+    const color = palette[i % palette.length]; i++;
+    addTrackListItem(tid,color,cnt);
   }
-  await db.setItem(tid, pts);
-  allTracks[tid] = pts;
-  drawFullTrack(tid, palette[Object.keys(allTracks).length % palette.length]);
-  addTrackListItem(tid, palette[Object.keys(allTracks).length % palette.length], pts.length);
-  showAlert('Simulated track added');
-};
+}
 
-// --------------------------- End of script ---------------------------
+// --------------------------- Charts ---------------------------
+function pushToCharts(pt){
+  const maxN=120, lbl=shortTs(pt.ts);
+  if(speedChart.data.labels.length>=maxN){ speedChart.data.labels.shift(); speedChart.data.datasets.forEach(ds=>ds.data.shift()); }
+  speedChart.data.labels.push(lbl); speedChart.data.datasets[0].data.push(pt.speed||0); speedChart.data.datasets[1].data.push(pt._bearing||0); speedChart.update('none');
+  if(activityChart.data.labels.length>=240){ activityChart.data.labels.shift(); activityChart.data.datasets[0].data.shift(); activityChart.data.datasets[0].backgroundColor.shift(); }
+  activityChart.data.labels.push(lbl); activityChart.data.datasets[0].data.push(1); activityChart.data.datasets[0].backgroundColor.push(activityColor[pt.activity]||'#888'); activityChart.update('none');
+}
+
+// --------------------------- Export / Delete ---------------------------
+async function exportTrackCSV(tid){
+  const pts=allTracks[tid]; if(!pts) return alert('No points');
+  let csv='lat,lon,ts,speed,activity\n';
+  pts.forEach(p=>csv+=`${p.lat},${p.lon},${p.ts},${p.speed||''},${p.activity||''}\n`);
+  const blob=new Blob([csv],{type:'text/csv'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`track_${tid}.csv`; a.click();
+}
+async function exportTrackGPX(tid){
+  const pts=allTracks[tid]; if(!pts) return alert('No points');
+  const gpx = togpx({type:'FeatureCollection',features:pts.map(p=>({type:'Feature',geometry:{type:'Point',coordinates:[p.lon,p.lat]},properties:{time:new Date(p.ts).toISOString()}}))});
+  const blob=new Blob([gpx],{type:'application/gpx+xml'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`track_${tid}.gpx`; a.click();
+}
+async function exportTrackGPXAuto(tid){ await exportTrackGPX(tid); }
+async function deleteTrack(tid){ await db.removeItem(tid); delete allTracks[tid]; refreshTrackList(); if(polylineMap[tid]) map.removeLayer(polylineMap[tid]); showAlert('Track deleted'); }
+function toggleVisibility(tid){ if(!polylineMap[tid]) return; const vis = !visibility[tid]; visibility[tid]=vis; if(vis) polylineMap[tid].addTo(map); else map.removeLayer(polylineMap[tid]); }
+
+// --------------------------- Playback ---------------------------
+function playTrack(tid){
+  const pts=allTracks[tid]; if(!pts || !pts.length) return;
+  let i=0; const poly=L.polyline([],{color:'#ff6600',weight:4}).addTo(map);
+  const interval=setInterval(()=>{ if(i>=pts.length){ clearInterval(interval); return; } poly.addLatLng([pts[i].lat,pts[i].lon]); i++; },200);
+}
+
+// --------------------------- Geofences ---------------------------
+function addGeofence(lat,lon,radius){
+  const gf = {lat,lon,radius};
+  geofences.push(gf);
+  const c = L.circle([lat,lon],{radius,color:'#f43f5e',fillOpacity:0.1}).addTo(map);
+  gf._layer=c; updateGeofenceList();
+}
+function updateGeofenceList(){
+  const div=document.getElementById('geofenceList'); div.innerHTML='';
+  geofences.forEach((g,i)=>{ const d=document.createElement('div'); d.textContent=`#${i+1} ${g.lat.toFixed(5)},${g.lon.toFixed(5)} (${g.radius}m)`; div.appendChild(d); });
+}
+
+// --------------------------- AI Predictor (TF.js) ---------------------------
+async function trainPredictor(){ showAlert('Training predictor...'); await tf.nextFrame(); /* Dummy demo */ showAlert('Predictor ready'); }
+
+// --------------------------- UI ---------------------------
+document.getElementById('startRec').onclick=startRecording;
+document.getElementById('stopRec').onclick=stopRecording;
+document.getElementById('trainAI').onclick=trainPredictor;
+document.getElementById('collapseBtn').onclick=()=>document.getElementById('sidebar').classList.toggle('collapsed');
+document.getElementById('addGeofence').onclick=()=>{ const lat=parseFloat(document.getElementById('gfLat').value), lon=parseFloat(document.getElementById('gfLon').value), rad=parseInt(document.getElementById('gfRad').value); if(lat && lon && rad) addGeofence(lat,lon,rad); };
+document.getElementById('showAll').onclick=()=>{ Object.keys(polylineMap).forEach(k=>{ polylineMap[k].addTo(map); visibility[k]=true; }); };
+document.getElementById('hideAll').onclick=()=>{ Object.values(polylineMap).forEach(p=>map.removeLayer(p)); Object.keys(polylineMap).forEach(k=>visibility[k]=false); };
+document.getElementById('clearAll').onclick=async()=>{ if(confirm('Delete all tracks?')){ await db.clear(); allTracks={}; clearAllPolylines(); refreshTrackList(); showAlert('All tracks deleted'); }; };
+document.getElementById('exportAll').onclick=()=>{ Object.keys(allTracks).forEach(tid=>exportTrackCSV(tid)); };
+
+// --------------------------- Startup ---------------------------
+(async function startup(){
+  initMap(); initCharts(); await loadAllTracks();
+  if(navigator.geolocation) navigator.geolocation.getCurrentPosition(pos=>map.setView([pos.coords.latitude,pos.coords.longitude],16));
+})();
 </script>
 </body>
 </html>
+
+ 
+
+
+
+
+ 
