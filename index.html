@@ -282,14 +282,14 @@ function addTrackListItem(tid, color, count){
   if(document.getElementById('item_'+tid)) return;
   const list = document.getElementById('trackList');
   const div = document.createElement('div'); div.className = 'track-item'; div.id = 'item_'+tid;
-  div.innerHTML = `<div class="track-meta"><span class="track-color" style="background:${color}"></span><div style="font-size:0.95rem">${tid}<div style="font-size:0.8rem;color:#64748b">${count} pts</div></div></div>
+  div.innerHTML = <div class="track-meta"><span class="track-color" style="background:${color}"></span><div style="font-size:0.95rem">${tid}<div style="font-size:0.8rem;color:#64748b">${count} pts</div></div></div>
     <div style="display:flex;gap:6px;align-items:center">
       <button onclick="playTrack('${tid}')" title="Play">▶</button>
       <button onclick="exportTrackCSV('${tid}')" title="CSV">CSV</button>
       <button onclick="exportTrackGPX('${tid}')" title="GPX">GPX</button>
       <button onclick="toggleVisibility('${tid}')" title="Toggle">👁</button>
       <button onclick="deleteTrack('${tid}')" title="Delete">🗑️</button>
-    </div>`;
+    </div>;
   list.prepend(div);
 }
 
@@ -323,9 +323,9 @@ async function exportTrackCSV(tid){
   const pts = allTracks[tid];
   if(!pts) return alert('No points');
   let csv = 'lat,lon,ts,speed,activity\n';
-  pts.forEach(p => csv += `${p.lat},${p.lon},${p.ts},${p.speed||''},${p.activity||''}\n`);
+  pts.forEach(p => csv += ${p.lat},${p.lon},${p.ts},${p.speed||''},${p.activity||''}\n);
   const blob = new Blob([csv], { type:'text/csv' });
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${tid}.csv`; a.click();
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = ${tid}.csv; a.click();
 }
 async function exportTrackGPX(tid){
   const pts = allTracks[tid];
@@ -333,7 +333,7 @@ async function exportTrackGPX(tid){
   const geojson = { type:'FeatureCollection', features: pts.map(p=>({ type:'Feature', geometry:{type:'Point', coordinates:[p.lon,p.lat]}, properties:{ts:p.ts,speed:p.speed,activity:p.activity} })) };
   const gpx = togpx(geojson, { creator:'BTMLiveTracker' });
   const blob = new Blob([gpx], { type:'application/gpx+xml' });
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${tid}.gpx`; a.click();
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = ${tid}.gpx; a.click();
 }
 async function deleteTrack(tid){
   if(!confirm('Delete '+tid+'?')) return;
@@ -348,7 +348,7 @@ async function deleteTrack(tid){
 // --------------------------- Geofence functions ---------------------------
 function renderGeofenceUI(){
   const el = document.getElementById('geofenceList');
-  el.innerHTML = geofences.map((g,i)=>`G${i+1}: ${g.lat.toFixed(4)}, ${g.lon.toFixed(4)} (r=${g.radius}m)`).join('<br>');
+  el.innerHTML = geofences.map((g,i)=>G${i+1}: ${g.lat.toFixed(4)}, ${g.lon.toFixed(4)} (r=${g.radius}m)).join('<br>');
 }
 function addGeofence(lat,lon,radius){
   const circle = L.circle([lat,lon], { radius, color:'#f59e0b', weight:1 }).addTo(map);
@@ -369,7 +369,7 @@ function detectAnomalies(point){
   // sudden speed jump
   if(prevPoint){
     const ds = (point.speed||0) - (prevPoint.speed||0);
-    if(ds > 20) showAlert(`⚠️ Sudden speed increase +${ds.toFixed(1)} km/h`, [point.lat, point.lon]);
+    if(ds > 20) showAlert(⚠️ Sudden speed increase +${ds.toFixed(1)} km/h, [point.lat, point.lon]);
     // sharp turn detection using last bearing
     if(prevPoint._bearing !== undefined){
       const bPrev = prevPoint._bearing;
@@ -572,7 +572,7 @@ document.getElementById('hideAll').addEventListener('click', ()=>{
 document.getElementById('exportAll').addEventListener('click', async ()=>{
   let csv = 'track,lat,lon,ts,speed,activity\n';
   for(const tid of Object.keys(allTracks)){
-    (allTracks[tid]||[]).forEach(p=> csv += `${tid},${p.lat},${p.lon},${p.ts},${p.speed||''},${p.activity||''}\n`);
+    (allTracks[tid]||[]).forEach(p=> csv += ${tid},${p.lat},${p.lon},${p.ts},${p.speed||''},${p.activity||''}\n);
   }
   const blob = new Blob([csv], { type:'text/csv' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'all_tracks.csv'; a.click();
@@ -609,14 +609,14 @@ function addTrackListItem(tid, color, count){
   if(document.getElementById('item_'+tid)) return;
   const container = document.getElementById('trackList');
   const div = document.createElement('div'); div.className='track-item'; div.id='item_'+tid;
-  div.innerHTML = `<div class="track-meta"><span class="track-color" style="background:${color}"></span><div style="font-size:0.95rem">${tid}<div style="font-size:0.8rem;color:#64748b">${count} pts</div></div></div>
+  div.innerHTML = <div class="track-meta"><span class="track-color" style="background:${color}"></span><div style="font-size:0.95rem">${tid}<div style="font-size:0.8rem;color:#64748b">${count} pts</div></div></div>
     <div style="display:flex;gap:6px;align-items:center">
       <button onclick="playTrack('${tid}')">▶</button>
       <button onclick="exportTrackCSV('${tid}')">CSV</button>
       <button onclick="exportTrackGPX('${tid}')">GPX</button>
       <button onclick="toggleVisibility('${tid}')">👁</button>
       <button onclick="deleteTrack('${tid}')">🗑</button>
-    </div>`;
+    </div>;
   container.prepend(div);
 }
 
