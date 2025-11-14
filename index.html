@@ -219,7 +219,15 @@ function initMap(){
   baseLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap contributors'
   }).addTo(map);
-  liveMarker = L.marker([0,0]).addTo(map).bindPopup('No data yet');
+
+  // SMALL DOT for current position (replaces big blue pin)
+  liveMarker = L.circleMarker([0,0], {
+    radius: 6,
+    color: '#1f2937',
+    weight: 1.5,
+    fillColor: '#3b82f6',
+    fillOpacity: 0.95
+  }).addTo(map).bindPopup('No data yet');
 
   setTimeout(()=>map.invalidateSize(), 300);
   window.addEventListener('resize', ()=> map.invalidateSize());
@@ -345,7 +353,14 @@ function showAlert(msg, latlng){
   setTimeout(()=>{ if(el.textContent === msg) el.textContent = ''; }, 6000);
 
   if(map && latlng){
-    const mk = L.marker(latlng, { title: msg }).bindPopup(msg).addTo(map);
+    // small yellow/orange alert dot instead of big pin
+    const mk = L.circleMarker(latlng, {
+      radius: 5,
+      color: '#f97316',
+      weight: 1.2,
+      fillColor: '#facc15',
+      fillOpacity: 0.95
+    }).bindPopup(msg).addTo(map);
     alertMarkers.push(mk);
   }
 }
@@ -433,33 +448,16 @@ function drawFullTrack(tid, baseColor){
   polylineMap[tid] = base;
 }
 
-let liveMarker = null;   // make sure this is declared near the top
-
 function drawLivePoint(point){
-  // draw / extend the coloured line
   if(!currentPolyline){
     currentPolyline = L.polyline([], {
       color: activityColor[point.activity] || '#1f77b4',
-      weight: 4,
-      opacity: 0.9
+      weight:4
     }).addTo(map);
   }
   currentPolyline.addLatLng([point.lat, point.lon]);
-
-  // show current position as a small dot, not a big pin
-  if(!liveMarker){
-    liveMarker = L.circleMarker([point.lat, point.lon], {
-      radius: 5,
-      color: '#111',
-      weight: 1,
-      fillColor: '#ffffff',
-      fillOpacity: 1
-    }).addTo(map);
-  } else {
-    liveMarker.setLatLng([point.lat, point.lon]);
-  }
+  liveMarker.setLatLng([point.lat, point.lon]);  // small dot moves
 }
-
 
 // ---------------------------------------------------------------------
 //  TRACK LIST UI
@@ -881,15 +879,18 @@ startBtn.addEventListener('click', startRecording);
 stopBtn .addEventListener('click', stopRecording);
 
 // ---------------------------------------------------------------------
-//  PLAYBACK & SIMULATOR (reuse from dashboard)
+//  PLAYBACK & SIMULATOR
 // ---------------------------------------------------------------------
 window.playTrack = function(tid){
   const pts = allTracks[tid];
   if(!pts || !pts.length) return alert('No points');
   map.setView([pts[0].lat, pts[0].lon], 16);
 
-  let i = 0;
-  const marker = L.marker([pts[0].lat, pts[0].lon]).addTo(map);
+  let i=0;
+  // small dark playback dot instead of big pin
+  const marker = L.circleMarker([pts[0].lat, pts[0].lon], {
+    radius:5, color:'#111827', weight:1, fillColor:'#111827', fillOpacity:1
+  }).addTo(map);
   const poly   = L.polyline([], {color:'#000', weight:4}).addTo(map);
   const iv = setInterval(()=>{
     if(i >= pts.length){ clearInterval(iv); return; }
@@ -937,7 +938,6 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=120){
     activityChart.update();
   }, 400);
 
-  // mobile hint from simple app
   if(/Mobi|Android/i.test(navigator.userAgent)){
     latestEl.textContent = 'Tap Start to allow location access and begin tracking.';
   }
