@@ -432,7 +432,7 @@ function drawFullTrack(tid, baseColor){
       const coords = seg.pts.map(p => [p.lat, p.lon]);
       const poly = L.polyline(coords, {
         color: activityColor[seg.activity] || baseColor,
-        weight: 7,          // THICKER activity segments
+        weight: 10,          // updated to 10
         opacity: 0.9,
         lineCap: 'round',
         lineJoin: 'round'
@@ -445,7 +445,7 @@ function drawFullTrack(tid, baseColor){
   const baseCoords = pts.map(p => [p.lat, p.lon]);
   const base = L.polyline(baseCoords, {
     color: baseColor,
-    weight: 3,            // slightly thicker base line
+    weight: 10,            // updated to 10
     opacity: 0.6
   }).addTo(map);
   base.on('click', ()=>{ toggleVisibility(tid); });
@@ -456,7 +456,7 @@ function drawLivePoint(point){
   if(!currentPolyline){
     currentPolyline = L.polyline([], {
       color: activityColor[point.activity] || '#1f77b4',
-      weight: 7,          // thicker live line
+      weight: 10,          // updated to 10
       lineCap: 'round',
       lineJoin: 'round'
     }).addTo(map);
@@ -896,7 +896,7 @@ window.playTrack = function(tid){
   const marker = L.circleMarker([pts[0].lat, pts[0].lon], {
     radius:5, color:'#111827', weight:1, fillColor:'#111827', fillOpacity:1
   }).addTo(map);
-  const poly   = L.polyline([], {color:'#000', weight:6}).addTo(map); // thicker playback
+  const poly   = L.polyline([], {color:'#000', weight:10}).addTo(map); // updated to 10
   const iv = setInterval(()=>{
     if(i >= pts.length){ clearInterval(iv); return; }
     poly.addLatLng([pts[i].lat, pts[i].lon]);
@@ -950,3 +950,4 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=120){
 </script>
 </body>
 </html>
+
