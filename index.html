@@ -433,16 +433,33 @@ function drawFullTrack(tid, baseColor){
   polylineMap[tid] = base;
 }
 
+let liveMarker = null;   // make sure this is declared near the top
+
 function drawLivePoint(point){
+  // draw / extend the coloured line
   if(!currentPolyline){
     currentPolyline = L.polyline([], {
       color: activityColor[point.activity] || '#1f77b4',
-      weight:4
+      weight: 4,
+      opacity: 0.9
     }).addTo(map);
   }
   currentPolyline.addLatLng([point.lat, point.lon]);
-  liveMarker.setLatLng([point.lat, point.lon]);
+
+  // show current position as a small dot, not a big pin
+  if(!liveMarker){
+    liveMarker = L.circleMarker([point.lat, point.lon], {
+      radius: 5,
+      color: '#111',
+      weight: 1,
+      fillColor: '#ffffff',
+      fillOpacity: 1
+    }).addTo(map);
+  } else {
+    liveMarker.setLatLng([point.lat, point.lon]);
+  }
 }
+
 
 // ---------------------------------------------------------------------
 //  TRACK LIST UI
