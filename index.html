@@ -1,190 +1,151 @@
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Simple Phone Tracker</title>
+let watchId = null;
+let records = [];
+const latestEl = document.getElementById('latest');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const exportBtn = document.getElementById('exportBtn');
+const copyBtn = document.getElementById('copyBtn');
 
-  <!-- Leaflet for map (CDN) -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-  <style>
-    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; margin: 8px; }
-    #map { height: 50vh; border: 1px solid #ccc; margin-top: 8px; }
-    pre { background:#f7f7f7; padding:8px; border-radius:6px; overflow:auto; }
-    button { margin-right:6px; }
-  </style>
-</head>
-<body>
-  <h1>Simple Phone Tracker</h1>
-  <p>
-    Open this page, tap <strong>Start</strong> and allow location access. Keep the page open to continue tracking.
-  </p>
+// Initialize map with a more reasonable starting point
+const map = L.map('map').setView([-29, 26], 6); // Centered on South Africa
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, 
+  attribution: '© OpenStreetMap'
+}).addTo(map);
+const marker = L.marker([0,0]).addTo(map).bindPopup('No data yet').setOpacity(0.5);
 
-  <div>
-    <button id="startBtn">Start</button>
-    <button id="stopBtn" disabled>Stop</button>
-    <button id="exportBtn" disabled>Export CSV</button>
-    <button id="copyBtn" disabled>Copy latest coords</button>
-  </div>
-
-  <div id="info">
-    <h3>Latest position</h3>
-    <pre id="latest">No position yet.</pre>
-  </div>
-
-  <div id="map"></div>
-
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script>
-    let watchId = null;
-    let records = [];
-    const latestEl = document.getElementById('latest');
-    const startBtn = document.getElementById('startBtn');
-    const stopBtn = document.getElementById('stopBtn');
-    const exportBtn = document.getElementById('exportBtn');
-    const copyBtn = document.getElementById('copyBtn');
-
-    // Initialize map with a more reasonable starting point
-    const map = L.map('map').setView([-29, 26], 6); // Centered on South Africa
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19, 
-      attribution: '© OpenStreetMap'
-    }).addTo(map);
-    const marker = L.marker([0,0]).addTo(map).bindPopup('No data yet').setOpacity(0.5);
-
-    function formatPos(p) {
-      return `Lat: ${p.latitude.toFixed(6)}
+function formatPos(p) {
+  return `Lat: ${p.latitude.toFixed(6)}
 Lng: ${p.longitude.toFixed(6)}
 Accuracy: ${p.accuracy} m
 Altitude: ${p.altitude === null ? 'n/a' : p.altitude + ' m'}
 Timestamp: ${new Date(p.timestamp).toLocaleString()}`;
-    }
+}
 
-    function isValidLocation(latitude, longitude, accuracy) {
-      // Basic validation - Bloemfontein should be around [-29.1, 26.2]
-      // Reject positions that are clearly wrong
-      if (accuracy > 10000) { // Accuracy worse than 10km
-        console.warn('Poor accuracy:', accuracy);
-        return false;
-      }
-      
-      // Check if coordinates are in reasonable range for South Africa
-      // South Africa roughly: Lat -22 to -35, Lon 16 to 33
-      if (latitude > -15 || latitude < -40 || longitude < 10 || longitude > 40) {
-        console.warn('Suspicious coordinates:', latitude, longitude);
-        return false;
-      }
-      
-      return true;
-    }
+function isValidLocation(latitude, longitude, accuracy) {
+  // Basic validation - Bloemfontein should be around [-29.1, 26.2]
+  // Reject positions that are clearly wrong
+  if (accuracy > 10000) { // Accuracy worse than 10km
+    console.warn('Poor accuracy:', accuracy);
+    return false;
+  }
+  
+  // Check if coordinates are in reasonable range for South Africa
+  // South Africa roughly: Lat -22 to -35, Lon 16 to 33
+  if (latitude > -15 || latitude < -40 || longitude < 10 || longitude > 40) {
+    console.warn('Suspicious coordinates:', latitude, longitude);
+    return false;
+  }
+  
+  return true;
+}
 
-    function onPosition(pos) {
-      const c = pos.coords;
-      
-      // Validate the location
-      if (!isValidLocation(c.latitude, c.longitude, c.accuracy)) {
-        latestEl.textContent = `Location accuracy poor (${c.accuracy}m). Waiting for better signal...\n\nLast reading:\n${formatPos({ ...c, timestamp: pos.timestamp })}`;
-        marker.setOpacity(0.3); // Make marker semi-transparent for poor accuracy
-        return;
-      }
-      
-      const rec = {
-        timestamp: new Date(pos.timestamp).toISOString(),
-        latitude: c.latitude,
-        longitude: c.longitude,
-        accuracy: c.accuracy,
-        altitude: c.altitude === null ? '' : c.altitude,
-        heading: c.heading === null ? '' : c.heading,
-        speed: c.speed === null ? '' : c.speed
-      };
-      records.push(rec);
+function onPosition(pos) {
+  const c = pos.coords;
+  
+  // Validate the location
+  if (!isValidLocation(c.latitude, c.longitude, c.accuracy)) {
+    latestEl.textContent = `Location accuracy poor (${c.accuracy}m). Waiting for better signal...\n\nLast reading:\n${formatPos({ ...c, timestamp: pos.timestamp })}`;
+    marker.setOpacity(0.3); // Make marker semi-transparent for poor accuracy
+    return;
+  }
+  
+  const rec = {
+    timestamp: new Date(pos.timestamp).toISOString(),
+    latitude: c.latitude,
+    longitude: c.longitude,
+    accuracy: c.accuracy,
+    altitude: c.altitude === null ? '' : c.altitude,
+    heading: c.heading === null ? '' : c.heading,
+    speed: c.speed === null ? '' : c.speed
+  };
+  records.push(rec);
 
-      latestEl.textContent = formatPos({ ...c, timestamp: pos.timestamp });
-      marker.setLatLng([c.latitude, c.longitude]);
-      marker.setPopupContent(`Lat ${c.latitude.toFixed(6)}, Lng ${c.longitude.toFixed(6)}\nAccuracy: ${c.accuracy}m`);
-      marker.setOpacity(1.0); // Full opacity for good accuracy
-      map.setView([c.latitude, c.longitude], Math.max(16, map.getZoom()));
+  latestEl.textContent = formatPos({ ...c, timestamp: pos.timestamp });
+  marker.setLatLng([c.latitude, c.longitude]);
+  marker.setPopupContent(`Lat ${c.latitude.toFixed(6)}, Lng ${c.longitude.toFixed(6)}\nAccuracy: ${c.accuracy}m`);
+  marker.setOpacity(1.0); // Full opacity for good accuracy
+  map.setView([c.latitude, c.longitude], Math.max(16, map.getZoom()));
 
-      exportBtn.disabled = false;
-      copyBtn.disabled = false;
-    }
+  exportBtn.disabled = false;
+  copyBtn.disabled = false;
+}
 
-    function onError(err) {
-      let message = `Error (${err.code}): ${err.message}`;
-      if (err.code === 1) {
-        message += '\n\nPlease allow location access in your browser permissions.';
-      } else if (err.code === 2) {
-        message += '\n\nPosition unavailable. Check your device location settings.';
-      } else if (err.code === 3) {
-        message += '\n\nLocation request timed out.';
-      }
-      latestEl.textContent = message;
-    }
+function onError(err) {
+  let message = `Error (${err.code}): ${err.message}`;
+  if (err.code === 1) {
+    message += '\n\nPlease allow location access in your browser permissions.';
+  } else if (err.code === 2) {
+    message += '\n\nPosition unavailable. Check your device location settings.';
+  } else if (err.code === 3) {
+    message += '\n\nLocation request timed out.';
+  }
+  latestEl.textContent = message;
+}
 
-    startBtn.addEventListener('click', () => {
-      if (!('geolocation' in navigator)) {
-        alert('Geolocation is not supported on this browser.');
-        return;
-      }
-      
-      // Clear any previous watches
-      if (watchId !== null) {
-        navigator.geolocation.clearWatch(watchId);
-      }
-      
-      // Request permission & start watching
-      watchId = navigator.geolocation.watchPosition(onPosition, onError, {
-        enableHighAccuracy: true,
-        maximumAge: 30000, // Allow some caching but not too old
-        timeout: 15000
-      });
-      startBtn.disabled = true;
-      stopBtn.disabled = false;
-      latestEl.textContent = 'Waiting for location... (grant permission if asked)';
-    });
+startBtn.addEventListener('click', () => {
+  if (!('geolocation' in navigator)) {
+    alert('Geolocation is not supported on this browser.');
+    return;
+  }
+  
+  // Clear any previous watches
+  if (watchId !== null) {
+    navigator.geolocation.clearWatch(watchId);
+  }
+  
+  // Request permission & start watching
+  watchId = navigator.geolocation.watchPosition(onPosition, onError, {
+    enableHighAccuracy: true,
+    maximumAge: 30000, // Allow some caching but not too old
+    timeout: 15000
+  });
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  latestEl.textContent = 'Waiting for location... (grant permission if asked)';
+});
 
-    stopBtn.addEventListener('click', () => {
-      if (watchId !== null) {
-        navigator.geolocation.clearWatch(watchId);
-        watchId = null;
-      }
-      startBtn.disabled = false;
-      stopBtn.disabled = true;
-      latestEl.textContent += '\n\nTracking stopped.';
-    });
+// === MISSING EVENT LISTENERS - ADD THESE ===
 
-    exportBtn.addEventListener('click', () => {
-      if (records.length === 0) return alert('No records to export.');
-      const header = ['timestamp','latitude','longitude','accuracy','altitude','heading','speed'];
-      const csvRows = [header.join(',')].concat(records.map(r => header.map(h => JSON.stringify(r[h] ?? '')).join(',')));
-      const blob = new Blob([csvRows.join('\n')], {type: 'text/csv'});
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      const name = `positions_${new Date().toISOString().replace(/[:.]/g,'-')}.csv`;
-      a.download = name;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    });
+stopBtn.addEventListener('click', () => {
+  if (watchId !== null) {
+    navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+  }
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  latestEl.textContent += '\n\nTracking stopped.';
+});
 
-    copyBtn.addEventListener('click', async () => {
-      if (records.length === 0) return;
-      const last = records[records.length-1];
-      const text = `${last.latitude},${last.longitude} (accuracy ${last.accuracy} m)`;
-      try {
-        await navigator.clipboard.writeText(text);
-        alert('Latest coords copied to clipboard:\n' + text);
-      } catch (e) {
-        alert('Could not copy to clipboard. Here are the coords:\n' + text);
-      }
-    });
+exportBtn.addEventListener('click', () => {
+  if (records.length === 0) return alert('No records to export.');
+  const header = ['timestamp','latitude','longitude','accuracy','altitude','heading','speed'];
+  const csvRows = [header.join(',')].concat(records.map(r => header.map(h => JSON.stringify(r[h] ?? '')).join(',')));
+  const blob = new Blob([csvRows.join('\n')], {type: 'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const name = `positions_${new Date().toISOString().replace(/[:.]/g,'-')}.csv`;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+});
 
-    // optional: prompt user to start when page is opened on mobile by showing a little hint
-    if (/Mobi|Android/i.test(navigator.userAgent)) {
-      latestEl.textContent = 'Tap Start to allow location access and begin tracking.';
-    }
-  </script>
-</body>
-</html>
+copyBtn.addEventListener('click', async () => {
+  if (records.length === 0) return;
+  const last = records[records.length-1];
+  const text = `${last.latitude},${last.longitude} (accuracy ${last.accuracy} m)`;
+  try {
+    await navigator.clipboard.writeText(text);
+    alert('Latest coords copied to clipboard:\n' + text);
+  } catch (e) {
+    alert('Could not copy to clipboard. Here are the coords:\n' + text);
+  }
+});
+
+// optional: prompt user to start when page is opened on mobile by showing a little hint
+if (/Mobi|Android/i.test(navigator.userAgent)) {
+  latestEl.textContent = 'Tap Start to allow location access and begin tracking.';
+}
