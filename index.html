@@ -51,36 +51,39 @@
     }).addTo(map);
     const marker = L.marker([0,0]).addTo(map).bindPopup('No data yet');
 
-    function formatPos(p) {
-      return `Lat: ${p.latitude.toFixed(6)}
-Lng: ${p.longitude.toFixed(6)}
-Accuracy: ${p.accuracy} m
-Altitude: ${p.altitude === null ? 'n/a' : p.altitude + ' m'}
-Timestamp: ${new Date(p.timestamp).toLocaleString()}`;
-    }
+    function formatPos(pos) {
+  const c = pos.coords;
+  return `Lat: ${c.latitude.toFixed(6)}
+Lng: ${c.longitude.toFixed(6)}
+Accuracy: ${c.accuracy} m
+Altitude: ${c.altitude === null ? 'n/a' : c.altitude + ' m'}
+Timestamp: ${new Date(pos.timestamp).toLocaleString()}`;
+}
 
-    function onPosition(pos) {
-      const c = pos.coords;
-      const rec = {
-        timestamp: new Date(pos.timestamp).toISOString(),
-        latitude: c.latitude,
-        longitude: c.longitude,
-        accuracy: c.accuracy,
-        altitude: c.altitude === null ? '' : c.altitude,
-        heading: c.heading === null ? '' : c.heading,
-        speed: c.speed === null ? '' : c.speed
-      };
-      records.push(rec);
+function onPosition(pos) {
+  const c = pos.coords;
+  const rec = {
+    timestamp: new Date(pos.timestamp).toISOString(),
+    latitude: c.latitude,
+    longitude: c.longitude,
+    accuracy: c.accuracy,
+    altitude: c.altitude === null ? '' : c.altitude,
+    heading: c.heading === null ? '' : c.heading,
+    speed: c.speed === null ? '' : c.speed
+  };
+  records.push(rec);
 
-      latestEl.textContent = formatPos({ ...c, timestamp: pos.timestamp });
-      marker.setLatLng([c.latitude, c.longitude]);
-      marker.setPopupContent(`Lat ${c.latitude.toFixed(6)}, Lng ${c.longitude.toFixed(6)}`);
-      map.setView([c.latitude, c.longitude], 16);
+  // use the new formatPos
+  latestEl.textContent = formatPos(pos);
 
-      exportBtn.disabled = false;
-      copyBtn.disabled = false;
-    }
+  marker.setLatLng([c.latitude, c.longitude]);
+  marker.setPopupContent(`Lat ${c.latitude.toFixed(6)}, Lng ${c.longitude.toFixed(6)}`);
+  map.setView([c.latitude, c.longitude], 16);
 
+  exportBtn.disabled = false;
+  copyBtn.disabled = false;
+}
+    
     function onError(err) {
       latestEl.textContent = `Error (${err.code}): ${err.message}`;
     }
