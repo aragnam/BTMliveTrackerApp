@@ -219,15 +219,7 @@ function initMap(){
   baseLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap contributors'
   }).addTo(map);
-
-  // small dot for current position
-  liveMarker = L.circleMarker([0,0], {
-    radius: 6,
-    color: '#1f2937',
-    weight: 1.5,
-    fillColor: '#3b82f6',
-    fillOpacity: 0.95
-  }).addTo(map).bindPopup('No data yet');
+  liveMarker = L.marker([0,0]).addTo(map).bindPopup('No data yet');
 
   setTimeout(()=>map.invalidateSize(), 300);
   window.addEventListener('resize', ()=> map.invalidateSize());
@@ -243,19 +235,21 @@ let currentTrackId = null;
 let currentPolyline = null;
 let prevPoint = null;
 
-let allTracks   = {};
-let polylineMap = {};
-let segmentMap  = {};
-let visibility  = {};
+let allTracks   = {};  // trackId -> [points]
+let polylineMap = {};  // trackId -> base polyline
+let segmentMap  = {};  // trackId -> [activity polylines]
+let visibility  = {};  // trackId -> bool
 
 let alertMarkers = [];
-let geofences = [];
+let geofences = [];    // {lat,lon,radius,leaflet}
 
 let predictorModel = null;
 let predictorReady = false;
 
+// "simple" session records (for Export / Copy latest)
 let sessionRecords = [];
 
+// colors
 const activityColor = {
   walking:'#16a34a',
   running:'#f97316',
@@ -351,13 +345,7 @@ function showAlert(msg, latlng){
   setTimeout(()=>{ if(el.textContent === msg) el.textContent = ''; }, 6000);
 
   if(map && latlng){
-    const mk = L.circleMarker(latlng, {
-      radius: 5,
-      color: '#f97316',
-      weight: 1.2,
-      fillColor: '#facc15',
-      fillOpacity: 0.95
-    }).bindPopup(msg).addTo(map);
+    const mk = L.marker(latlng, { title: msg }).bindPopup(msg).addTo(map);
     alertMarkers.push(mk);
   }
 }
@@ -432,10 +420,7 @@ function drawFullTrack(tid, baseColor){
       const coords = seg.pts.map(p => [p.lat, p.lon]);
       const poly = L.polyline(coords, {
         color: activityColor[seg.activity] || baseColor,
-        weight: 10,          // updated to 10
-        opacity: 0.9,
-        lineCap: 'round',
-        lineJoin: 'round'
+        weight:4, opacity:0.9
       }).addTo(map);
       segLayers.push(poly);
     }
@@ -443,11 +428,7 @@ function drawFullTrack(tid, baseColor){
   segmentMap[tid] = segLayers;
 
   const baseCoords = pts.map(p => [p.lat, p.lon]);
-  const base = L.polyline(baseCoords, {
-    color: baseColor,
-    weight: 10,            // updated to 10
-    opacity: 0.6
-  }).addTo(map);
+  const base = L.polyline(baseCoords, { color:baseColor, weight:2, opacity:0.6 }).addTo(map);
   base.on('click', ()=>{ toggleVisibility(tid); });
   polylineMap[tid] = base;
 }
@@ -456,9 +437,7 @@ function drawLivePoint(point){
   if(!currentPolyline){
     currentPolyline = L.polyline([], {
       color: activityColor[point.activity] || '#1f77b4',
-      weight: 10,          // updated to 10
-      lineCap: 'round',
-      lineJoin: 'round'
+      weight:4
     }).addTo(map);
   }
   currentPolyline.addLatLng([point.lat, point.lon]);
@@ -885,18 +864,16 @@ startBtn.addEventListener('click', startRecording);
 stopBtn .addEventListener('click', stopRecording);
 
 // ---------------------------------------------------------------------
-//  PLAYBACK & SIMULATOR
+//  PLAYBACK & SIMULATOR (reuse from dashboard)
 // ---------------------------------------------------------------------
 window.playTrack = function(tid){
   const pts = allTracks[tid];
   if(!pts || !pts.length) return alert('No points');
   map.setView([pts[0].lat, pts[0].lon], 16);
 
-  let i=0;
-  const marker = L.circleMarker([pts[0].lat, pts[0].lon], {
-    radius:5, color:'#111827', weight:1, fillColor:'#111827', fillOpacity:1
-  }).addTo(map);
-  const poly   = L.polyline([], {color:'#000', weight:10}).addTo(map); // updated to 10
+  let i = 0;
+  const marker = L.marker([pts[0].lat, pts[0].lon]).addTo(map);
+  const poly   = L.polyline([], {color:'#000', weight:4}).addTo(map);
   const iv = setInterval(()=>{
     if(i >= pts.length){ clearInterval(iv); return; }
     poly.addLatLng([pts[i].lat, pts[i].lon]);
@@ -943,6 +920,7 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=120){
     activityChart.update();
   }, 400);
 
+  // mobile hint from simple app
   if(/Mobi|Android/i.test(navigator.userAgent)){
     latestEl.textContent = 'Tap Start to allow location access and begin tracking.';
   }
