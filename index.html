@@ -151,9 +151,20 @@ function success(pos){
 
 function error(err){ console.warn(err); alert("Location unavailable"); }
 
-if(navigator.geolocation){
-  navigator.geolocation.watchPosition(success,error,{enableHighAccuracy:true,maximumAge:0,timeout:5000});
-} else alert("Geolocation not supported");
+if (navigator.geolocation) {
+  navigator.geolocation.watchPosition(
+    success,
+    error,
+    {
+      enableHighAccuracy: true,   // or try false if this still times out
+      maximumAge: 10000,          // can reuse a fix from last 10s
+      timeout: 20000              // 20s to get a first fix
+    }
+  );
+} else {
+  alert("Geolocation not supported");
+}
+
 </script>
 </body>
 </html>
