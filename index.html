@@ -1,43 +1,45 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>My Live Location Tracker</title>
+<meta charset="utf-8">
+<title>Live Location Tracker</title>
 
+<!-- Leaflet CSS + JS -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
-<!-- PWA manifest -->
-<link rel="manifest" href="manifest.json">
-<meta name="theme-color" content="#007bff">
-
 <style>
-  html, body { height:100%; margin:0; }
-  #map { height:100%; width:100%; }
-  #controls {
-    position: fixed; top:10px; left:10px;
-    z-index:9999;
-    background: rgba(255,255,255,0.9);
-    border-radius: 8px;
-    padding: 6px 12px;
-    display: flex; flex-direction: column; gap: 4px;
-  }
-  button, label { font-size: 14px; cursor: pointer; }
-  button { background: #007bff; color:white; border:none; border-radius:6px; padding:6px 10px; }
-  button:hover { background: #0056b3; }
-  #legend {
-    position: fixed; bottom:10px; right:10px;
-    background: rgba(255,255,255,0.9);
-    padding: 8px 12px;
-    border-radius: 8px;
-    font-size: 13px;
-    z-index:9999;
-    line-height:1.3;
-  }
-  .legend-title { font-weight:bold; margin-bottom:4px; text-align:center; }
-  .gradient-bar { width:120px; height:10px; background:linear-gradient(to right, green, yellow, red); border-radius:4px; margin-bottom:4px; }
-  .legend-section { margin-top:6px; }
+html, body { height:100%; margin:0; }
+#map { height:100%; width:100%; }
+
+#controls {
+  position: fixed; top:10px; left:10px;
+  z-index:9999;
+  background: rgba(255,255,255,0.9);
+  border-radius: 8px;
+  padding: 6px 12px;
+  box-shadow: 0 0 4px rgba(0,0,0,0.2);
+  display: flex; flex-direction: column; gap: 4px;
+}
+button, label { font-size: 14px; cursor: pointer; }
+button { background: #007bff; color:white; border:none; border-radius:6px; padding:6px 10px; }
+button:hover { background: #0056b3; }
+
+#legend {
+  position: fixed; bottom:10px; right:10px;
+  background: rgba(255,255,255,0.9);
+  padding: 8px 12px;
+  border-radius: 8px;
+  box-shadow: 0 0 4px rgba(0,0,0,0.2);
+  font-size: 13px;
+  z-index:9999;
+  line-height:1.3;
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}
+#legend.updating { opacity:0.4; transform: translateY(6px); }
+.legend-title { font-weight:bold; margin-bottom:4px; text-align:center; }
+.gradient-bar { width:120px; height:10px; background:linear-gradient(to right, green, yellow, red); border-radius:4px; margin-bottom:4px; }
+.legend-section { margin-top:6px; }
 </style>
 </head>
 <body>
@@ -45,6 +47,7 @@
 
 <div id="controls">
   <label><input type="checkbox" id="follow" checked> Follow live</label>
+  <button onclick="clearHistory()">🗑️ Clear History</button>
 </div>
 
 <div id="legend">
@@ -54,119 +57,164 @@
 </div>
 
 <script>
+// ===== Map Initialization =====
 const map = L.map('map').setView([0,0],2);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-  maxZoom:19, attribution:'© OpenStreetMap'
+    maxZoom:19, attribution:'© OpenStreetMap'
 }).addTo(map);
 
-let liveMarker=null;
-let lineLayers=[], pointMarkers=[], lastBounds=null;
-const legend=document.getElementById('legend');
-const altLegendSpan=document.createElement('div');
-altLegendSpan.style.display='flex'; altLegendSpan.style.justifyContent='space-between';
+let liveMarker = null;
+let lineLayers = [];
+let pointMarkers = [];
+let lastBounds = null;
+
+// ===== Legend elements =====
+const legend = document.getElementById('legend');
+const altLegendSpan = document.createElement('div');
+altLegendSpan.style.display='flex';
+altLegendSpan.style.justifyContent='space-between';
 document.querySelector('#legend .gradient-bar').after(altLegendSpan);
-const speedLegendSection=document.querySelector('#legend .legend-section');
-const speedRangeLabel=document.createElement('div');
-speedRangeLabel.style.fontSize='12px'; speedRangeLabel.style.textAlign='center';
-speedRangeLabel.style.marginTop='4px'; speedLegendSection.after(speedRangeLabel);
-  
+
+const speedLegendSection = document.querySelector('#legend .legend-section');
+const speedRangeLabel = document.createElement('div');
+speedRangeLabel.style.fontSize='12px';
+speedRangeLabel.style.textAlign='center';
+speedRangeLabel.style.marginTop='4px';
+speedLegendSection.after(speedRangeLabel);
+
+// ===== Utility Functions =====
 function altGradientColor(alt,minAlt,maxAlt){
-  if(alt==null) return '#808080';
-  const ratio=Math.min(Math.max((alt-minAlt)/(maxAlt-minAlt),0),1);
-  const r=Math.round(ratio*255);
-  const g=Math.round(255 - ratio*255);
-  return `rgb(${r},${g},0)`;
+    if(alt===null||alt===undefined) return '#808080';
+    const ratio = Math.min(Math.max((alt-minAlt)/(maxAlt-minAlt),0),1);
+    const r = Math.round(ratio*255);
+    const g = Math.round(255 - ratio*255);
+    return `rgb(${r},${g},0)`;
 }
 
-function altGradientColor(alt, minAlt, maxAlt) {
-  if (alt == null) return '#808080';
-  if (maxAlt === minAlt) return 'rgb(0,255,0)'; // or any fixed color
-  const ratio = Math.min(Math.max((alt - minAlt) / (maxAlt - minAlt), 0), 1);
-  const r = Math.round(ratio * 255);
-  const g = Math.round(255 - ratio * 255);
-  return `rgb(${r},${g},0)`;
+function speedColor(speed,minSpeed,maxSpeed){
+    if(speed===null||speed===undefined) return 'gray';
+    const ratio = Math.min(Math.max((speed-minSpeed)/(maxSpeed-minSpeed),0),1);
+    if(ratio<0.33) return 'green';
+    if(ratio<0.66) return 'yellow';
+    return 'red';
 }
 
-function speedColor(speed, minSpeed, maxSpeed) {
-  if (speed == null) return 'gray';
-  if (maxSpeed === minSpeed) return 'green'; // or any single color
-  const ratio = Math.min(Math.max((speed - minSpeed) / (maxSpeed - minSpeed), 0), 1);
-  if (ratio < 0.33) return 'green';
-  if (ratio < 0.66) return 'yellow';
-  return 'red';
+function animateLegendUpdate(){
+    legend.classList.add('updating');
+    setTimeout(()=> legend.classList.remove('updating'), 600);
 }
 
-  function animateLegendUpdate(){ legend.classList.add('updating'); setTimeout(()=>legend.classList.remove('updating'),600); }
+// ===== History =====
+let allPoints = JSON.parse(localStorage.getItem('savedPoints')) || [];
 
-let allPoints=[];
-
+// ===== Plotting =====
 function plotPoints(points){
-  if(points.length===0) return;
-  lineLayers.forEach(l=>map.removeLayer(l));
-  pointMarkers.forEach(m=>map.removeLayer(m));
-  lineLayers=[]; pointMarkers=[];
-  const alts=points.map(p=>p.altitude||0);
-  const speeds=points.map(p=>p.speed||0);
-  const minAlt=Math.min(...alts), maxAlt=Math.max(...alts);
-  const minSpeed=Math.min(...speeds), maxSpeed=Math.max(...speeds);
-  animateLegendUpdate();
-  altLegendSpan.innerHTML=`<span>${minAlt.toFixed(0)} m</span><span>${maxAlt.toFixed(0)} m</span>`;
-  speedRangeLabel.innerHTML=`<b>Speed range:</b> ${minSpeed.toFixed(1)} → ${maxSpeed.toFixed(1)} m/s`;
-  for(let i=1;i<points.length;i++){
-    const p1=points[i-1], p2=points[i];
-    const color=altGradientColor(p2.altitude,minAlt,maxAlt);
-    lineLayers.push(L.polyline([[p1.lat,p1.lon],[p2.lat,p2.lon]],{color,weight:3}).addTo(map));
-  }
-  points.forEach(p=>{
-    const popup=`<b>${p.ts}</b><br>Lat: ${p.lat.toFixed(6)}<br>Lon: ${p.lon.toFixed(6)}<br>Alt: ${p.altitude||'N/A'} m<br>Speed: ${p.speed||'N/A'} m/s`;
-    pointMarkers.push(L.circleMarker([p.lat,p.lon],{radius:4,color:'blue'}).bindPopup(popup).addTo(map));
-  });
-  const last=points[points.length-1];
-  const latestPos=[last.lat,last.lon];
-  const color=speedColor(last.speed,minSpeed,maxSpeed);
-  const popup=`<b>📍 Latest</b><br>${last.ts}<br>Lat: ${last.lat.toFixed(6)}<br>Lon: ${last.lon.toFixed(6)}<br>Alt: ${last.altitude||'N/A'}<br>Speed: ${last.speed||'N/A'}`;
-  if(!liveMarker){
-    liveMarker=L.circleMarker(latestPos,{radius:8,color,fillColor:color,fillOpacity:0.9}).bindPopup(popup).addTo(map);
-  } else{
-    liveMarker.setLatLng(latestPos);
-    liveMarker.setStyle({color,fillColor:color});
-    liveMarker.setPopupContent(popup);
-  }
-  const follow=document.getElementById('follow').checked;
-  if(follow) map.panTo(latestPos,{animate:true,duration:1.0});
-  else if(!lastBounds) map.fitBounds(L.featureGroup(lineLayers).getBounds());
-  lastBounds=L.featureGroup(lineLayers).getBounds();
-}
+    if(points.length===0) return;
 
-function addPoint(lat,lon,alt,spd,accuracy){
-  const now=new Date().toLocaleTimeString();
-  allPoints.push({lat,lon,altitude:alt,speed:spd,accuracy,ts:now});
-  plotPoints(allPoints);
-}
+    // Clear old layers
+    lineLayers.forEach(l=>map.removeLayer(l));
+    lineLayers=[];
+    pointMarkers.forEach(m=>map.removeLayer(m));
+    pointMarkers=[];
 
-function success(pos){
-  const c=pos.coords;
-  addPoint(c.latitude,c.longitude,c.altitude,c.speed,c.accuracy);
-}
+    const alts = points.map(p=>p.altitude||0);
+    const speeds = points.map(p=>p.speed||0);
+    const minAlt = Math.min(...alts), maxAlt = Math.max(...alts);
+    const minSpeed = Math.min(...speeds), maxSpeed = Math.max(...speeds);
 
-function error(err){ console.warn(err); alert("Location unavailable"); }
+    animateLegendUpdate();
 
-if (navigator.geolocation) {
-  navigator.geolocation.watchPosition(
-    success,
-    error,
-    {
-      enableHighAccuracy: true,   // or try false if this still times out
-      maximumAge: 10000,          // can reuse a fix from last 10s
-      timeout: 20000              // 20s to get a first fix
+    // Update legends
+    altLegendSpan.innerHTML = `<span>${minAlt.toFixed(0)} m</span><span>${maxAlt.toFixed(0)} m</span>`;
+    speedRangeLabel.innerHTML = `<b>Speed range:</b> ${minSpeed.toFixed(1)} → ${maxSpeed.toFixed(1)} m/s`;
+
+    // Draw path
+    for(let i=1;i<points.length;i++){
+        const p1=points[i-1], p2=points[i];
+        const color = altGradientColor(p2.altitude,minAlt,maxAlt);
+        const seg=L.polyline([[p1.lat,p1.lon],[p2.lat,p2.lon]],{color,weight:3}).addTo(map);
+        lineLayers.push(seg);
     }
-  );
-} else {
-  alert("Geolocation not supported");
+
+    // Waypoints
+    points.forEach(p=>{
+        const popup=`<b>${p.ts}</b><br>
+        Lat: ${p.lat.toFixed(6)}<br>
+        Lon: ${p.lon.toFixed(6)}<br>
+        Accuracy: ${p.accuracy||'N/A'} m<br>
+        Altitude: ${p.altitude||'N/A'} m<br>
+        Speed: ${p.speed||'N/A'} m/s`;
+        const m=L.circleMarker([p.lat,p.lon],{radius:4,color:'blue'}).bindPopup(popup).addTo(map);
+        pointMarkers.push(m);
+    });
+
+    // Live marker
+    const last = points[points.length-1];
+    const latestPos = [last.lat,last.lon];
+    const color = speedColor(last.speed,minSpeed,maxSpeed);
+    const popup = `<b>📍 Latest</b><br>${last.ts}<br>
+        Lat: ${last.lat.toFixed(6)}<br>
+        Lon: ${last.lon.toFixed(6)}<br>
+        Accuracy: ${last.accuracy||'N/A'} m<br>
+        Altitude: ${last.altitude||'N/A'} m<br>
+        Speed: ${last.speed||'N/A'} m/s`;
+    if(!liveMarker){
+        liveMarker=L.circleMarker(latestPos,{radius:8,color,fillColor:color,fillOpacity:0.9})
+            .bindPopup(popup).addTo(map);
+    } else{
+        liveMarker.setLatLng(latestPos);
+        liveMarker.setStyle({color,fillColor:color});
+        liveMarker.setPopupContent(popup);
+    }
+
+    const follow=document.getElementById('follow').checked;
+    if(follow) map.panTo(latestPos,{animate:true,duration:1.0});
+    else if(!lastBounds) map.fitBounds(L.featureGroup(lineLayers).getBounds());
+    lastBounds=L.featureGroup(lineLayers).getBounds();
+
+    // Save to LocalStorage
+    localStorage.setItem('savedPoints', JSON.stringify(allPoints));
 }
 
+// ===== Clear History Button =====
+function clearHistory(){
+    allPoints = [];
+    localStorage.removeItem('savedPoints');
+    plotPoints(allPoints);
+}
+
+// ===== Geolocation =====
+function success(pos){
+    const crd = pos.coords;
+    const now = new Date().toLocaleTimeString();
+    const point = {
+        lat: crd.latitude,
+        lon: crd.longitude,
+        altitude: crd.altitude,
+        speed: crd.speed,
+        accuracy: crd.accuracy,
+        ts: now
+    };
+    allPoints.push(point);
+    plotPoints(allPoints);
+}
+
+function error(err){
+    console.warn(`ERROR(${err.code}): ${err.message}`);
+}
+
+if(navigator.geolocation){
+    navigator.geolocation.watchPosition(success,error,{
+        enableHighAccuracy:true,
+        maximumAge:0,
+        timeout:5000
+    });
+} else {
+    alert("Geolocation not supported by your browser.");
+}
+
+// ===== Initial load =====
+plotPoints(allPoints);
 </script>
 </body>
 </html>
-
-
