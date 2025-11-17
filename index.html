@@ -69,7 +69,7 @@ const speedLegendSection=document.querySelector('#legend .legend-section');
 const speedRangeLabel=document.createElement('div');
 speedRangeLabel.style.fontSize='12px'; speedRangeLabel.style.textAlign='center';
 speedRangeLabel.style.marginTop='4px'; speedLegendSection.after(speedRangeLabel);
-
+  
 function altGradientColor(alt,minAlt,maxAlt){
   if(alt==null) return '#808080';
   const ratio=Math.min(Math.max((alt-minAlt)/(maxAlt-minAlt),0),1);
@@ -78,15 +78,25 @@ function altGradientColor(alt,minAlt,maxAlt){
   return `rgb(${r},${g},0)`;
 }
 
-function speedColor(speed,minSpeed,maxSpeed){
-  if(speed==null) return 'gray';
-  const ratio=Math.min(Math.max((speed-minSpeed)/(maxSpeed-minSpeed),0),1);
-  if(ratio<0.33) return 'green';
-  if(ratio<0.66) return 'yellow';
+function altGradientColor(alt, minAlt, maxAlt) {
+  if (alt == null) return '#808080';
+  if (maxAlt === minAlt) return 'rgb(0,255,0)'; // or any fixed color
+  const ratio = Math.min(Math.max((alt - minAlt) / (maxAlt - minAlt), 0), 1);
+  const r = Math.round(ratio * 255);
+  const g = Math.round(255 - ratio * 255);
+  return `rgb(${r},${g},0)`;
+}
+
+function speedColor(speed, minSpeed, maxSpeed) {
+  if (speed == null) return 'gray';
+  if (maxSpeed === minSpeed) return 'green'; // or any single color
+  const ratio = Math.min(Math.max((speed - minSpeed) / (maxSpeed - minSpeed), 0), 1);
+  if (ratio < 0.33) return 'green';
+  if (ratio < 0.66) return 'yellow';
   return 'red';
 }
 
-function animateLegendUpdate(){ legend.classList.add('updating'); setTimeout(()=>legend.classList.remove('updating'),600); }
+  function animateLegendUpdate(){ legend.classList.add('updating'); setTimeout(()=>legend.classList.remove('updating'),600); }
 
 let allPoints=[];
 
