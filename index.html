@@ -293,6 +293,83 @@ const activityLabel = {
 };
 const palette = ['#1f77b4','#9467bd','#8c564b','#e377c2','#17becf','#7f7f7f'];
 
+// --- extra globals for filtering noise ---
+let prevFixForSpeed = null;   // last GPS fix used for distance-based speed
+let speedWindow     = [];     // recent speeds (km/h)
+let activityWindow  = [];     // recent activity labels
+
+// robust speed estimate (km/h) from GPS + distance/time
+function safeSpeedKmhFromFix(c){
+  const now = Date.now();
+  const cur = { lat: c.latitude, lon: c.longitude, t: now };
+
+  // 1) GPS-reported speed (m/s → km/h)
+  let vGps = (c.speed || 0) * 3.6;
+  if (!isFinite(vGps)) vGps = 0;
+
+  // 2) distance-based speed from previous fix
+  let vDist = null;
+  if (prevFixForSpeed) {
+    const dt = (now - prevFixForSpeed.t) / 1000; // seconds
+    if (dt > 0 && dt < 60) {                     // ignore huge gaps
+      const d = haversine(
+        { lat: prevFixForSpeed.lat, lon: prevFixForSpeed.lon },
+        { lat: cur.lat,            lon: cur.lon }
+      ); // metres
+      const km  = d / 1000;
+      const hrs = dt / 3600;
+      vDist = km / hrs;                          // km/h
+    }
+  }
+  prevFixForSpeed = cur;
+
+  // prefer distance-based if available, fallback to GPS speed
+  let v = vDist !== null ? vDist : vGps;
+  if (!isFinite(v) || v < 0) v = 0;
+
+  // if accuracy is poor, don't trust big speeds
+  if (c.accuracy && c.accuracy > 40) {
+    // high HDOP → treat as very slow
+    v = Math.min(v, 3); // max walking pace
+  }
+
+  // clamp completely crazy spikes
+  if (v > 120) v = 120;
+
+  // 3) moving-average smoothing over last ~5 samples
+  speedWindow.push(v);
+  if (speedWindow.length > 5) speedWindow.shift();
+  const avg = speedWindow.reduce((a,b)=>a+b,0) / speedWindow.length;
+  return avg;
+}
+
+// more conservative thresholds
+function classifyActivityFromSpeed(speedKmh){
+  if (speedKmh < 0.5)  return 'stationary';
+  if (speedKmh < 7)    return 'walking';
+  if (speedKmh < 13)   return 'running';
+  if (speedKmh < 35)   return 'cycling';
+  return 'driving';
+}
+
+// temporal smoothing: majority of last N labels
+function smoothActivity(raw){
+  activityWindow.push(raw);
+  if (activityWindow.length > 7) activityWindow.shift();
+
+  const counts = {};
+  activityWindow.forEach(a => { counts[a] = (counts[a] || 0) + 1; });
+
+  let best = raw, bestCount = 0;
+  for (const a in counts){
+    if (counts[a] > bestCount){
+      bestCount = counts[a];
+      best = a;
+    }
+  }
+  return best;
+}
+  
 // ---------------------------------------------------------------------
 //  CHARTS
 // ---------------------------------------------------------------------
@@ -794,6 +871,12 @@ const copyBtn    = document.getElementById('copyBtn');
 async function onPosition(pos){
   const c = pos.coords;
 
+  // --- robust speed & activity estimation ---
+  const speedKmh    = safeSpeedKmhFromFix(c);   // filtered speed
+  const rawActivity = classifyActivityFromSpeed(speedKmh);
+  const activity    = smoothActivity(rawActivity);
+
+  // Save raw data row for CSV/clipboard
   const rec = {
     timestamp: new Date(pos.timestamp).toISOString(),
     latitude : c.latitude,
@@ -801,7 +884,7 @@ async function onPosition(pos){
     accuracy : c.accuracy,
     altitude : c.altitude === null ? '' : c.altitude,
     heading  : c.heading  === null ? '' : c.heading,
-    speed    : c.speed    === null ? '' : c.speed
+    speed    : speedKmh / 3.6   // store in m/s (filtered)
   };
   sessionRecords.push(rec);
 
@@ -809,20 +892,22 @@ async function onPosition(pos){
   exportBtn.disabled = false;
   copyBtn.disabled   = false;
 
+  // Dashboard / map point
   const pt = {
-    lat  : c.latitude,
-    lon  : c.longitude,
-    ts   : Date.now(),
-    speed: (c.speed || 0) * 3.6,
+    lat     : c.latitude,
+    lon     : c.longitude,
+    ts      : Date.now(),
+    speed   : speedKmh,       // km/h (filtered)
     accuracy: c.accuracy,
     altitude: c.altitude,
-    heading : c.heading
+    heading : c.heading,
+    activity: activity        // smoothed classification
   };
-  pt.activity = classifyActivity(pt.speed);
 
-  if(currentTrackId){
+  if (currentTrackId){
     await savePoint(currentTrackId, pt);
   }
+
   drawLivePoint(pt);
   map.setView([pt.lat, pt.lon], 16);
 
