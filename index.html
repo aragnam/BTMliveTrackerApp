@@ -12,6 +12,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/togpx/0.0.6/togpx.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.12.0/dist/tf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
   <style>
     :root{--sidebar-width:320px}
@@ -69,7 +70,7 @@
       flex:1;min-width:200px;background:#fff;border-radius:8px;
       border:1px solid #e6eef6;padding:8px
     }
-    canvas{width:100% !important;height:160px !重要}
+    canvas{width:100% !important;height:160px !important}
     .footer-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
     .searchrow{display:flex;gap:8px;margin-top:8px}
     pre#latest{
@@ -134,11 +135,14 @@
 
     <div style="font-weight:600;margin-bottom:6px;font-size:0.9rem">Quick actions</div>
     <div class="footer-actions">
-      <button id="showAll" class="small">Show all tracks</button>
-      <button id="hideAll" class="small">Hide all</button>
+      <button id="showAll"   class="small">Show all tracks</button>
+      <button id="hideAll"   class="small">Hide all</button>
       <button id="exportAll" class="small">Export all (CSV)</button>
-      <button id="clearAll" class="small">Delete all</button>
-      <button id="simulate" class="small">Add demo track</button>
+      <button id="clearAll"  class="small">Delete all</button>
+      <button id="simulate"  class="small">Add demo track</button>
+      <!-- NEW investigator tools -->
+      <button id="bundleBtn"  class="small">Investigation ZIP</button>
+      <button id="summaryBtn" class="small">Case summary</button>
     </div>
 
     <div style="margin-top:12px;font-size:0.8rem;color:#64748b">
@@ -208,7 +212,7 @@ function bearing(a,b){
   return (toDeg(Math.atan2(y,x)) + 360) % 360;
 }
 
-// --- Activity classifier (with stationary) ---
+// basic classifier (still used for simulated tracks)
 function classifyActivity(speedKmh){
   if(speedKmh < 0.5)  return 'stationary';
   if(speedKmh < 6)    return 'walking';
@@ -221,7 +225,7 @@ function shortTs(ts){ return new Date(ts).toLocaleTimeString(); }
 function uuid(){ return 't_'+Date.now()+'_'+Math.random().toString(36).slice(2,8); }
 
 // ---------------------------------------------------------------------
-//  MAP INIT  (online-aware tiles: track works offline, tiles load when online)
+//  MAP INIT  (online-aware tiles)
 // ---------------------------------------------------------------------
 let map, baseLayer, liveMarker;
 
@@ -270,6 +274,7 @@ let visibility  = {};
 
 let alertMarkers = [];
 let geofences = [];
+let eventLog = [];   // investigator event timeline
 
 let predictorModel = null;
 let predictorReady = false;
@@ -296,6 +301,8 @@ const palette = ['#1f77b4','#9467bd','#8c564b','#e377c2','#17becf','#7f7f7f'];
 // --- extra globals for filtering noise ---
 let prevFixForSpeed = null;   // last GPS fix used for distance-based speed
 let speedWindow     = [];     // recent speeds (km/h)
+let lastSmoothedSpeed = 0;
+let fastStreak      = 0;      // consecutive very fast samples
 let activityWindow  = [];     // recent activity labels
 
 // robust speed estimate (km/h) from GPS + distance/time
@@ -305,7 +312,7 @@ function safeSpeedKmhFromFix(c){
 
   // 1) GPS-reported speed (m/s → km/h)
   let vGps = (c.speed || 0) * 3.6;
-  if (!isFinite(vGps)) vGps = 0;
+  if (!Number.isFinite(vGps)) vGps = 0;
 
   // 2) distance-based speed from previous fix
   let vDist = null;
@@ -325,12 +332,12 @@ function safeSpeedKmhFromFix(c){
 
   // prefer distance-based if available, fallback to GPS speed
   let v = vDist !== null ? vDist : vGps;
-  if (!isFinite(v) || v < 0) v = 0;
+  if (!Number.isFinite(v) || v < 0) v = 0;
 
   // if accuracy is poor, don't trust big speeds
   if (c.accuracy && c.accuracy > 40) {
-    // high HDOP → treat as very slow
-    v = Math.min(v, 3); // max walking pace
+    // high HDOP → treat as very slow (brisk walk max)
+    v = Math.min(v, 4);
   }
 
   // clamp completely crazy spikes
@@ -339,17 +346,53 @@ function safeSpeedKmhFromFix(c){
   // 3) moving-average smoothing over last ~5 samples
   speedWindow.push(v);
   if (speedWindow.length > 5) speedWindow.shift();
-  const avg = speedWindow.reduce((a,b)=>a+b,0) / speedWindow.length;
+  let avg = speedWindow.reduce((a,b)=>a+b,0) / speedWindow.length;
+
+  // 4) prevent huge jumps from one sample to the next
+  if (lastSmoothedSpeed !== null){
+    const maxDelta = 5; // km/h per sample (very conservative)
+    const delta    = avg - lastSmoothedSpeed;
+    if (Math.abs(delta) > maxDelta){
+      avg = lastSmoothedSpeed + Math.sign(delta) * maxDelta;
+    }
+  }
+  lastSmoothedSpeed = avg;
+
   return avg;
 }
 
-// more conservative thresholds
+// VERY conservative classifier: treat almost everything as walking
 function classifyActivityFromSpeed(speedKmh){
-  if (speedKmh < 0.5)  return 'stationary';
-  if (speedKmh < 7)    return 'walking';
-  if (speedKmh < 13)   return 'running';
-  if (speedKmh < 35)   return 'cycling';
-  return 'driving';
+  if (!Number.isFinite(speedKmh)) speedKmh = 0;
+
+  // almost zero → stationary
+  if (speedKmh < 0.5){
+    fastStreak = 0;
+    return 'stationary';
+  }
+
+  // up to ~7 km/h → walking
+  if (speedKmh < 7){
+    fastStreak = 0;
+    return 'walking';
+  }
+
+  // candidate fast segment – only count really fast speeds
+  if (speedKmh > 20){
+    fastStreak++;
+  } else {
+    // decay streak slowly if we dip below 20
+    fastStreak = Math.max(0, fastStreak - 1);
+  }
+
+  // ONLY if we see many consecutive very fast samples do we upgrade
+  if (fastStreak >= 10){
+    if (speedKmh > 45) return 'driving';
+    return 'cycling';
+  }
+
+  // until then, treat as walking (suppresses GPS spikes)
+  return 'walking';
 }
 
 // temporal smoothing: majority of last N labels
@@ -369,7 +412,7 @@ function smoothActivity(raw){
   }
   return best;
 }
-  
+
 // ---------------------------------------------------------------------
 //  CHARTS
 // ---------------------------------------------------------------------
@@ -453,8 +496,19 @@ function pushToCharts(pt){
 // ---------------------------------------------------------------------
 function showAlert(msg, latlng){
   const el = document.getElementById('alerts');
+  const ts = Date.now();
+
   el.textContent = msg;
   setTimeout(()=>{ if(el.textContent === msg) el.textContent = ''; }, 6000);
+
+  // investigator event log
+  eventLog.push({
+    ts,
+    localTime: new Date(ts).toLocaleString(),
+    message : msg,
+    lat     : latlng ? latlng[0] : null,
+    lon     : latlng ? latlng[1] : null
+  });
 
   if(map && latlng){
     const mk = L.circleMarker(latlng, {
@@ -496,7 +550,6 @@ function updateActivitySummary(){
       const prev = pts[i-1];
       const cur  = pts[i];
 
-      // use previous point's activity (time "spent" in that state until next point)
       const act = prev.activity || classifyActivity(prev.speed || 0);
 
       let tPrev = typeof prev.ts === 'number' ? prev.ts : Date.parse(prev.ts);
@@ -504,7 +557,6 @@ function updateActivitySummary(){
       if(!Number.isFinite(tPrev) || !Number.isFinite(tCur)) continue;
 
       const dtSec = (tCur - tPrev) / 1000;
-      // ignore crazy gaps (e.g. multi-day gaps between points)
       if(dtSec <= 0 || dtSec > 3600) continue;
 
       if(stats[act] !== undefined){
@@ -737,6 +789,158 @@ window.exportTrackGPX = exportTrackGPX;
 window.deleteTrack    = deleteTrack;
 
 // ---------------------------------------------------------------------
+//  INVESTIGATION BUNDLE (ZIP)
+// ---------------------------------------------------------------------
+function buildInvestigationBundle(){
+  if (Object.keys(allTracks).length === 0){
+    alert('No tracks to export.');
+    return;
+  }
+
+  const zip = new JSZip();
+
+  // 1) Raw points across all tracks (CSV)
+  let csv = 'track,lat,lon,ts,speed_kmh,activity,accuracy,altitude,heading\n';
+  for (const tid of Object.keys(allTracks)){
+    (allTracks[tid] || []).forEach(p=>{
+      csv += [
+        tid,
+        p.lat,
+        p.lon,
+        new Date(p.ts).toISOString(),
+        p.speed ?? '',
+        p.activity ?? '',
+        p.accuracy ?? '',
+        p.altitude ?? '',
+        p.heading ?? ''
+      ].join(',') + '\n';
+    });
+  }
+  zip.file('tracks_points.csv', csv);
+
+  // 2) Per-track stats (JSON)
+  const stats = {};
+  for (const tid of Object.keys(allTracks)){
+    const pts = allTracks[tid];
+    if (!pts || pts.length < 2) continue;
+
+    const startTs = pts[0].ts;
+    const endTs   = pts[pts.length-1].ts;
+    const durationSec = (endTs - startTs) / 1000;
+
+    let distM = 0;
+    const activityTime = {};
+    for (let i=1;i<pts.length;i++){
+      distM += haversine(pts[i-1], pts[i]);
+      const act = pts[i-1].activity || 'unknown';
+      const dt  = (pts[i].ts - pts[i-1].ts) / 1000;
+      activityTime[act] = (activityTime[act] || 0) + dt;
+    }
+
+    stats[tid] = {
+      start_time_iso : new Date(startTs).toISOString(),
+      end_time_iso   : new Date(endTs).toISOString(),
+      duration_sec   : durationSec,
+      distance_m     : distM,
+      distance_km    : distM / 1000,
+      activity_time_sec: activityTime
+    };
+  }
+  zip.file('track_stats.json', JSON.stringify(stats, null, 2));
+
+  // 3) Geofences
+  const gf = geofences.map(g => ({
+    lat: g.lat, lon: g.lon, radius_m: g.radius
+  }));
+  zip.file('geofences.json', JSON.stringify(gf, null, 2));
+
+  // 4) Event timeline (alerts)
+  zip.file('events.json', JSON.stringify(eventLog, null, 2));
+
+  // Generate and download
+  zip.generateAsync({type:'blob'}).then(blob=>{
+    const url = URL.createObjectURL(blob);
+    const a   = document.createElement('a');
+    a.href = url;
+    a.download = 'btm_investigation_bundle.zip';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+}
+
+// ---------------------------------------------------------------------
+//  CASE FILE TEXT SUMMARY
+// ---------------------------------------------------------------------
+function buildCaseSummary(){
+  const tids = Object.keys(allTracks);
+  if (tids.length === 0){
+    alert('No tracks recorded yet.');
+    return;
+  }
+  const tid = tids.sort().slice(-1)[0];  // last track
+  const pts = allTracks[tid];
+  if (!pts || pts.length < 2){
+    alert('Track too short for summary.');
+    return;
+  }
+
+  const start = new Date(pts[0].ts);
+  const end   = new Date(pts[pts.length-1].ts);
+  const durationMin = (pts[pts.length-1].ts - pts[0].ts) / 60000;
+
+  let distM = 0;
+  const actTime = {};
+  for (let i=1;i<pts.length;i++){
+    distM += haversine(pts[i-1], pts[i]);
+    const act = pts[i-1].activity || 'unknown';
+    const dt  = (pts[i].ts - pts[i-1].ts) / 1000;
+    actTime[act] = (actTime[act] || 0) + dt;
+  }
+  const distKm = distM / 1000;
+
+  const totalSec = Object.values(actTime).reduce((a,b)=>a+b,0) || 1;
+  const pct = actTimeKey => ((actTime[actTimeKey] || 0) / totalSec * 100).toFixed(1);
+
+  const numEvents = eventLog.length;
+  const firstEvent = eventLog[0];
+  const lastEvent  = eventLog[eventLog.length-1];
+
+  let summary = '';
+  summary += `Track ID : ${tid}\n`;
+  summary += `Start time : ${start.toLocaleString()}\n`;
+  summary += `End time   : ${end.toLocaleString()}\n`;
+  summary += `Duration   : ${durationMin.toFixed(1)} minutes\n`;
+  summary += `Distance   : ${distKm.toFixed(3)} km\n\n`;
+
+  summary += `Activity breakdown (by time):\n`;
+  summary += `  Stationary: ${pct('stationary')}%\n`;
+  summary += `  Walking   : ${pct('walking')}%\n`;
+  summary += `  Running   : ${pct('running')}%\n`;
+  summary += `  Cycling   : ${pct('cycling')}%\n`;
+  summary += `  Driving   : ${pct('driving')}%\n\n`;
+
+  if (numEvents === 0){
+    summary += `No anomaly or geofence alerts were triggered.\n`;
+  } else {
+    summary += `${numEvents} alerts were triggered (sudden speed, sharp turns, route deviation and/or geofence).\n`;
+    summary += `First alert: ${firstEvent.localTime} – ${firstEvent.message}\n`;
+    summary += `Last alert : ${lastEvent.localTime} – ${lastEvent.message}\n`;
+  }
+
+  const blob = new Blob([summary], {type:'text/plain'});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = `case_summary_${tid}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// ---------------------------------------------------------------------
 //  GEOFENCES
 // ---------------------------------------------------------------------
 function renderGeofenceUI(){
@@ -871,12 +1075,12 @@ const copyBtn    = document.getElementById('copyBtn');
 async function onPosition(pos){
   const c = pos.coords;
 
-  // --- robust speed & activity estimation ---
-  const speedKmh    = safeSpeedKmhFromFix(c);   // filtered speed
-  const rawActivity = classifyActivityFromSpeed(speedKmh);
-  const activity    = smoothActivity(rawActivity);
+  // filtered speed + conservative activity
+  const speedKmh     = safeSpeedKmhFromFix(c);
+  const rawActivity  = classifyActivityFromSpeed(speedKmh);
+  const activity     = smoothActivity(rawActivity);
 
-  // Save raw data row for CSV/clipboard
+  // 1) record row for CSV / clipboard
   const rec = {
     timestamp: new Date(pos.timestamp).toISOString(),
     latitude : c.latitude,
@@ -884,7 +1088,7 @@ async function onPosition(pos){
     accuracy : c.accuracy,
     altitude : c.altitude === null ? '' : c.altitude,
     heading  : c.heading  === null ? '' : c.heading,
-    speed    : speedKmh / 3.6   // store in m/s (filtered)
+    speed    : speedKmh / 3.6   // store filtered speed back in m/s
   };
   sessionRecords.push(rec);
 
@@ -892,7 +1096,7 @@ async function onPosition(pos){
   exportBtn.disabled = false;
   copyBtn.disabled   = false;
 
-  // Dashboard / map point
+  // 2) dashboard / map point
   const pt = {
     lat     : c.latitude,
     lon     : c.longitude,
@@ -901,10 +1105,10 @@ async function onPosition(pos){
     accuracy: c.accuracy,
     altitude: c.altitude,
     heading : c.heading,
-    activity: activity        // smoothed classification
+    activity: activity
   };
 
-  if (currentTrackId){
+  if(currentTrackId){
     await savePoint(currentTrackId, pt);
   }
 
@@ -921,7 +1125,7 @@ function onError(err){
 }
 
 // ---------------------------------------------------------------------
-//  START / STOP (with your watchPosition settings)
+//  START / STOP
 // ---------------------------------------------------------------------
 const startBtn = document.getElementById('startBtn');
 const stopBtn  = document.getElementById('stopBtn');
@@ -1053,6 +1257,8 @@ document.getElementById('collapseBtn').addEventListener('click', ()=>{
 });
 document.getElementById('trainAI').addEventListener('click', ()=>trainPredictor());
 document.getElementById('simulate').addEventListener('click', ()=>simulateTrack());
+document.getElementById('bundleBtn').addEventListener('click', buildInvestigationBundle);
+document.getElementById('summaryBtn').addEventListener('click', buildCaseSummary);
 
 startBtn.addEventListener('click', startRecording);
 stopBtn .addEventListener('click', stopRecording);
@@ -1108,7 +1314,7 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=120){
 
   const savedGeos = await db.getItem('__geofences__');
   if(savedGeos && Array.isArray(savedGeos)){
-    savedGeos.forEach(g => addGeofence(g.lat, g.lon, g.radius));
+    savedGeos.forEach(g => addGeofence(g.lat, g.radius ? g.radius : g.lat, g.radius));
   }
   await loadAllTracks();
   setTimeout(()=>{
@@ -1124,4 +1330,3 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=120){
 </script>
 </body>
 </html>
-
