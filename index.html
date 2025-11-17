@@ -6,8 +6,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <!-- Leaflet / libs -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
-  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/localforage/1.10.0/localforage.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/togpx/0.0.6/togpx.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -69,7 +69,7 @@
       flex:1;min-width:200px;background:#fff;border-radius:8px;
       border:1px solid #e6eef6;padding:8px
     }
-    canvas{width:100% !important;height:160px !important}
+    canvas{width:100% !important;height:160px !重要}
     .footer-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
     .searchrow{display:flex;gap:8px;margin-top:8px}
     pre#latest{
@@ -106,6 +106,11 @@
     </div>
 
     <hr style="margin:10px 0;border:none;border-top:1px solid #eef2f7"/>
+
+    <!-- Activity summary for investigators -->
+    <div id="activitySummary" style="font-size:0.85rem;color:#334155;margin-bottom:8px;">
+      <!-- Filled by JS -->
+    </div>
 
     <!-- Dashboard: Tracks -->
     <div style="font-size:0.9rem;color:#334155;margin-bottom:6px;font-weight:600">Saved tracks</div>
@@ -144,7 +149,7 @@
   <main id="mapWrap">
     <button id="collapseBtn"
       style="position:absolute;left:12px;top:12px;z-index:1300;border-radius:8px;
-             padding:6px 10px;background:#fff;border:1px solid #e6eef6;cursor:pointer">
+             padding:6px 10px;background:#fff;border:1px solid #eef2f7;cursor:pointer">
       ☰
     </button>
 
@@ -203,7 +208,7 @@ function bearing(a,b){
   return (toDeg(Math.atan2(y,x)) + 360) % 360;
 }
 
-// *** UPDATED: include "stationary" ***
+// --- Activity classifier (with stationary) ---
 function classifyActivity(speedKmh){
   if(speedKmh < 0.5)  return 'stationary';
   if(speedKmh < 6)    return 'walking';
@@ -216,11 +221,10 @@ function shortTs(ts){ return new Date(ts).toLocaleTimeString(); }
 function uuid(){ return 't_'+Date.now()+'_'+Math.random().toString(36).slice(2,8); }
 
 // ---------------------------------------------------------------------
-//  MAP INIT  (with online-aware tile loading like simple tracker)
+//  MAP INIT  (online-aware tiles: track works offline, tiles load when online)
 // ---------------------------------------------------------------------
 let map, baseLayer, liveMarker;
 
-// online-aware base layer loader
 function addBaseLayerIfOnline(){
   if(!baseLayer && navigator.onLine){
     baseLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -232,9 +236,8 @@ function addBaseLayerIfOnline(){
 function initMap(){
   map = L.map('map', { preferCanvas:true }).setView([0,0], 2);
 
-  // try to add tiles immediately if online
+  // tiles only if online; if offline tracking still works on blank background
   addBaseLayerIfOnline();
-  // when connection comes back, load tiles automatically
   window.addEventListener('online', addBaseLayerIfOnline);
 
   // small dot for current position
@@ -273,13 +276,20 @@ let predictorReady = false;
 
 let sessionRecords = [];
 
-// *** UPDATED: added stationary color ***
 const activityColor = {
   stationary:'#6b7280',
   walking   :'#16a34a',
   running   :'#f97316',
   cycling   :'#2563eb',
   driving   :'#dc2626'
+};
+const activityOrder = ['stationary','walking','running','cycling','driving'];
+const activityLabel = {
+  stationary:'Stationary',
+  walking   :'Walking',
+  running   :'Running',
+  cycling   :'Cycling',
+  driving   :'Driving'
 };
 const palette = ['#1f77b4','#9467bd','#8c564b','#e377c2','#17becf','#7f7f7f'];
 
@@ -387,6 +397,66 @@ function clearAlerts(){
 }
 
 // ---------------------------------------------------------------------
+//  ACTIVITY SUMMARY (time per class, all tracks)
+// ---------------------------------------------------------------------
+function updateActivitySummary(){
+  const el = document.getElementById('activitySummary');
+  if(!el) return;
+
+  const stats = {
+    stationary:0,
+    walking:0,
+    running:0,
+    cycling:0,
+    driving:0
+  };
+
+  // accumulate time from consecutive points per track
+  for(const tid of Object.keys(allTracks)){
+    const pts = allTracks[tid];
+    if(!pts || pts.length < 2) continue;
+    for(let i=1;i<pts.length;i++){
+      const prev = pts[i-1];
+      const cur  = pts[i];
+
+      // use previous point's activity (time "spent" in that state until next point)
+      const act = prev.activity || classifyActivity(prev.speed || 0);
+
+      let tPrev = typeof prev.ts === 'number' ? prev.ts : Date.parse(prev.ts);
+      let tCur  = typeof cur.ts  === 'number' ? cur.ts  : Date.parse(cur.ts);
+      if(!Number.isFinite(tPrev) || !Number.isFinite(tCur)) continue;
+
+      const dtSec = (tCur - tPrev) / 1000;
+      // ignore crazy gaps (e.g. multi-day gaps between points)
+      if(dtSec <= 0 || dtSec > 3600) continue;
+
+      if(stats[act] !== undefined){
+        stats[act] += dtSec;
+      }
+    }
+  }
+
+  let totalSec = 0;
+  activityOrder.forEach(a => totalSec += stats[a]);
+
+  let html = `<div style="font-weight:600;margin-bottom:4px;">Activity summary (all tracks)</div>`;
+  if(totalSec === 0){
+    html += `<div style="font-size:0.8rem;color:#64748b;">No tracked time yet.</div>`;
+  } else {
+    html += `<ul style="list-style:none;padding-left:0;margin:0;">`;
+    activityOrder.forEach(a=>{
+      const mins = stats[a] / 60;
+      html += `<li style="margin-bottom:2px;">
+        <span style="display:inline-block;width:10px;height:10px;border-radius:999px;background:${activityColor[a]};margin-right:4px;"></span>
+        ${activityLabel[a]}: ${mins.toFixed(1)} min
+      </li>`;
+    });
+    html += `</ul>`;
+  }
+  el.innerHTML = html;
+}
+
+// ---------------------------------------------------------------------
 //  TRACK STORAGE & RENDERING
 // ---------------------------------------------------------------------
 async function savePoint(trackId, point){
@@ -399,6 +469,7 @@ async function savePoint(trackId, point){
     drawLivePoint(point);
   }
   refreshTrackList();
+  updateActivitySummary();
 }
 
 async function loadAllTracks(){
@@ -416,6 +487,7 @@ async function loadAllTracks(){
     addTrackListItem(tid, color, allTracks[tid].length);
   }
   map.invalidateSize();
+  updateActivitySummary();
 }
 
 function clearAllPolylines(){
@@ -451,7 +523,7 @@ function drawFullTrack(tid, baseColor){
       const coords = seg.pts.map(p => [p.lat, p.lon]);
       const poly = L.polyline(coords, {
         color: activityColor[seg.activity] || baseColor,
-        weight: 10,          // already updated
+        weight: 10,
         opacity: 0.9,
         lineCap: 'round',
         lineJoin: 'round'
@@ -464,7 +536,7 @@ function drawFullTrack(tid, baseColor){
   const baseCoords = pts.map(p => [p.lat, p.lon]);
   const base = L.polyline(baseCoords, {
     color: baseColor,
-    weight: 10,            // already updated
+    weight: 10,
     opacity: 0.6
   }).addTo(map);
   base.on('click', ()=>{ toggleVisibility(tid); });
@@ -581,6 +653,7 @@ async function deleteTrack(tid){
   delete allTracks[tid];
   const el = document.getElementById('item_'+tid);
   if(el) el.remove();
+  updateActivitySummary();
 }
 window.exportTrackCSV = exportTrackCSV;
 window.exportTrackGPX = exportTrackGPX;
@@ -712,7 +785,7 @@ Timestamp: ${new Date(pos.timestamp).toLocaleString()}`;
 }
 
 // ---------------------------------------------------------------------
-//  MAIN GEO CALLBACK (combines simple + dashboard behaviour)
+//  MAIN GEO CALLBACK
 // ---------------------------------------------------------------------
 const latestEl   = document.getElementById('latest');
 const exportBtn  = document.getElementById('exportBtn');
@@ -721,7 +794,6 @@ const copyBtn    = document.getElementById('copyBtn');
 async function onPosition(pos){
   const c = pos.coords;
 
-  // Simple-mode record for CSV / copy
   const rec = {
     timestamp: new Date(pos.timestamp).toISOString(),
     latitude : c.latitude,
@@ -737,26 +809,23 @@ async function onPosition(pos){
   exportBtn.disabled = false;
   copyBtn.disabled   = false;
 
-  // Dashboard point
   const pt = {
     lat  : c.latitude,
     lon  : c.longitude,
     ts   : Date.now(),
-    speed: (c.speed || 0) * 3.6,   // m/s → km/h
+    speed: (c.speed || 0) * 3.6,
     accuracy: c.accuracy,
     altitude: c.altitude,
     heading : c.heading
   };
   pt.activity = classifyActivity(pt.speed);
 
-  // Save & draw
   if(currentTrackId){
     await savePoint(currentTrackId, pt);
   }
   drawLivePoint(pt);
   map.setView([pt.lat, pt.lon], 16);
 
-  // Analytics
   pushToCharts(pt);
   detectAnomalies(pt);
   checkGeofencesForPoint(pt);
@@ -767,7 +836,7 @@ function onError(err){
 }
 
 // ---------------------------------------------------------------------
-//  START / STOP
+//  START / STOP (with your watchPosition settings)
 // ---------------------------------------------------------------------
 const startBtn = document.getElementById('startBtn');
 const stopBtn  = document.getElementById('stopBtn');
@@ -793,7 +862,6 @@ async function startRecording(){
   stopBtn.disabled  = false;
   latestEl.textContent = 'Waiting for location... (grant permission if asked)';
 
-  // *** UPDATED: use your watchPosition options (works online + offline) ***
   watchId = navigator.geolocation.watchPosition(onPosition, onError, {
     enableHighAccuracy:true,
     maximumAge:0,
@@ -891,6 +959,7 @@ document.getElementById('clearAll').addEventListener('click', async ()=>{
   geofences.forEach(g => map.removeLayer(g.leaflet));
   geofences = [];
   renderGeofenceUI();
+  updateActivitySummary();
   showAlert('All cleared');
 });
 document.getElementById('collapseBtn').addEventListener('click', ()=>{
@@ -941,6 +1010,7 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=120){
   allTracks[tid] = pts;
   drawFullTrack(tid, palette[Object.keys(allTracks).length % palette.length]);
   addTrackListItem(tid, palette[Object.keys(allTracks).length % palette.length], pts.length);
+  updateActivitySummary();
   showAlert('Simulated track added');
 };
 
@@ -969,3 +1039,4 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=120){
 </script>
 </body>
 </html>
+
