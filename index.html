@@ -59,9 +59,22 @@ button:hover { background: #0056b3; }
 <script>
 // ===== Map Initialization =====
 const map = L.map('map').setView([0,0],2);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-    maxZoom:19, attribution:'© OpenStreetMap'
-}).addTo(map);
+
+// we will only add the base layer when we are online
+let baseLayer = null;
+function addBaseLayerIfOnline() {
+  if (!baseLayer && navigator.onLine) {
+    baseLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+      maxZoom:19, attribution:'© OpenStreetMap'
+    }).addTo(map);
+  }
+}
+
+// try immediately (if already online)
+addBaseLayerIfOnline();
+
+// when connection comes back, load the map tiles automatically
+window.addEventListener('online', addBaseLayerIfOnline);
 
 let liveMarker = null;
 let lineLayers = [];
@@ -84,7 +97,8 @@ speedLegendSection.after(speedRangeLabel);
 
 // ===== Utility Functions =====
 function altGradientColor(alt,minAlt,maxAlt){
-    if(alt===null||alt===undefined) return '#808080';
+    if(alt===null || alt===undefined) return '#808080';
+    if(maxAlt === minAlt) return 'rgb(0,255,0)'; // avoid divide-by-zero when all alts are same
     const ratio = Math.min(Math.max((alt-minAlt)/(maxAlt-minAlt),0),1);
     const r = Math.round(ratio*255);
     const g = Math.round(255 - ratio*255);
@@ -92,7 +106,8 @@ function altGradientColor(alt,minAlt,maxAlt){
 }
 
 function speedColor(speed,minSpeed,maxSpeed){
-    if(speed===null||speed===undefined) return 'gray';
+    if(speed===null || speed===undefined) return 'gray';
+    if(maxSpeed === minSpeed) return 'green'; // avoid divide-by-zero when all speeds are same
     const ratio = Math.min(Math.max((speed-minSpeed)/(maxSpeed-minSpeed),0),1);
     if(ratio<0.33) return 'green';
     if(ratio<0.66) return 'yellow';
@@ -169,8 +184,10 @@ function plotPoints(points){
 
     const follow=document.getElementById('follow').checked;
     if(follow) map.panTo(latestPos,{animate:true,duration:1.0});
-    else if(!lastBounds) map.fitBounds(L.featureGroup(lineLayers).getBounds());
-    lastBounds=L.featureGroup(lineLayers).getBounds();
+    else if(!lastBounds && lineLayers.length>0) map.fitBounds(L.featureGroup(lineLayers).getBounds());
+    if (lineLayers.length > 0) {
+      lastBounds=L.featureGroup(lineLayers).getBounds();
+    }
 
     // Save to LocalStorage
     localStorage.setItem('savedPoints', JSON.stringify(allPoints));
@@ -206,8 +223,8 @@ function error(err){
 if(navigator.geolocation){
     navigator.geolocation.watchPosition(success,error,{
         enableHighAccuracy:true,
-        maximumAge:0,
-        timeout:5000
+        maximumAge:10000,   // allow reuse of recent fix
+        timeout:20000       // give GPS more time, works better offline
     });
 } else {
     alert("Geolocation not supported by your browser.");
@@ -218,3 +235,4 @@ plotPoints(allPoints);
 </script>
 </body>
 </html>
+
