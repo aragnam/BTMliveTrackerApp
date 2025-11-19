@@ -98,15 +98,14 @@
       <button id="exportBtn" class="small" disabled>Export (session)</button>
       <button id="copyBtn" class="small" disabled>Copy latest</button>
       <button id="trainAI" class="small">Train Predictor</button>
-          <div style="font-size:0.75rem;color:#475569;">
-      Scenario for this run:
-      <select id="scenarioSelect" style="font-size:0.75rem;padding:2px 4px;border-radius:4px;border:1px solid #cbd5e1;">
-        <option value="ONLINE_FOREGROUND">Test A – Data ON, foreground</option>
-        <option value="OFFLINE_FOREGROUND">Test B – Data OFF, foreground</option>
-        <option value="OTHER">Other / mixed</option>
-      </select>
-    </div>
-
+      <div style="font-size:0.75rem;color:#475569;">
+        Scenario for this run:
+        <select id="scenarioSelect" style="font-size:0.75rem;padding:2px 4px;border-radius:4px;border:1px solid #cbd5e1;">
+          <option value="ONLINE_FOREGROUND">Test A – Data ON, foreground</option>
+          <option value="OFFLINE_FOREGROUND">Test B – Data OFF, foreground</option>
+          <option value="OTHER">Other / mixed</option>
+        </select>
+      </div>
     </div>
 
     <!-- Simple-mode latest position -->
@@ -289,6 +288,16 @@ let predictorModel = null;
 let predictorReady = false;
 
 let sessionRecords = [];
+
+// --- DIAGNOSTIC MODE GLOBALS ---
+let currentScenario = 'UNKNOWN';
+
+// for gap detection
+let lastFixTsForGap = null;
+const GAP_THRESHOLD_SEC = 10;   // log "GPS gap" if Δt > 10 s
+
+// online/offline state (for event log)
+let lastOnlineState = navigator.onLine;
 
 const activityColor = {
   stationary:'#6b7280',
@@ -535,6 +544,33 @@ function clearAlerts(){
   alertMarkers = [];
   document.getElementById('alerts').textContent = '';
 }
+
+// ---------------------------------------------------------------------
+//  ONLINE / OFFLINE DIAGNOSTIC EVENTS
+// ---------------------------------------------------------------------
+window.addEventListener('online', () => {
+  const ts = Date.now();
+  eventLog.push({
+    ts,
+    localTime: new Date(ts).toLocaleString(),
+    message: 'Browser went ONLINE',
+    lat: null,
+    lon: null
+  });
+  lastOnlineState = true;
+});
+
+window.addEventListener('offline', () => {
+  const ts = Date.now();
+  eventLog.push({
+    ts,
+    localTime: new Date(ts).toLocaleString(),
+    message: 'Browser went OFFLINE',
+    lat: null,
+    lon: null
+  });
+  lastOnlineState = false;
+});
 
 // ---------------------------------------------------------------------
 //  ACTIVITY SUMMARY (time per class, all tracks)
@@ -808,8 +844,8 @@ function buildInvestigationBundle(){
 
   const zip = new JSZip();
 
-  // 1) Raw points across all tracks (CSV)
-  let csv = 'track,lat,lon,ts,speed_kmh,activity,accuracy,altitude,heading\n';
+  // 1) Raw points across all tracks (CSV) - UPDATED HEADER
+  let csv = 'track,lat,lon,ts,speed_kmh,activity,accuracy,altitude,heading,scenario,online,pageVisible,gapFromPrevSec\n';
   for (const tid of Object.keys(allTracks)){
     (allTracks[tid] || []).forEach(p=>{
       csv += [
@@ -821,7 +857,11 @@ function buildInvestigationBundle(){
         p.activity ?? '',
         p.accuracy ?? '',
         p.altitude ?? '',
-        p.heading ?? ''
+        p.heading ?? '',
+        p.scenario ?? '',
+        p.online ?? '',
+        p.pageVisible ?? '',
+        p.gapFromPrevSec ?? ''
       ].join(',') + '\n';
     });
   }
@@ -863,7 +903,7 @@ function buildInvestigationBundle(){
   }));
   zip.file('geofences.json', JSON.stringify(gf, null, 2));
 
-  // 4) Event timeline (alerts)
+  // 4) Event timeline (alerts + GPS gaps + online/offline)
   zip.file('events.json', JSON.stringify(eventLog, null, 2));
 
   // Generate and download
@@ -1084,12 +1124,37 @@ const copyBtn    = document.getElementById('copyBtn');
 async function onPosition(pos){
   const c = pos.coords;
 
-  // filtered speed + conservative activity
+  // -------------------------------------------------------------------
+  // 1) SPEED + ACTIVITY (already robust, keep as is)
+  // -------------------------------------------------------------------
   const speedKmh     = safeSpeedKmhFromFix(c);
   const rawActivity  = classifyActivityFromSpeed(speedKmh);
   const activity     = smoothActivity(rawActivity);
 
-  // 1) record row for CSV / clipboard
+  // -------------------------------------------------------------------
+  // 2) GAP DETECTION (diagnostic)
+  // -------------------------------------------------------------------
+  let gapFromPrevSec = null;
+  if (lastFixTsForGap !== null) {
+    gapFromPrevSec = (pos.timestamp - lastFixTsForGap) / 1000;
+    if (gapFromPrevSec > GAP_THRESHOLD_SEC) {
+      const msg = `⚠️ GPS gap of ${gapFromPrevSec.toFixed(1)} s`;
+      showAlert(msg, [c.latitude, c.longitude]);
+      eventLog.push({
+        ts: Date.now(),
+        localTime: new Date().toLocaleString(),
+        message: msg,
+        lat: c.latitude,
+        lon: c.longitude,
+        gapSec: gapFromPrevSec
+      });
+    }
+  }
+  lastFixTsForGap = pos.timestamp;
+
+  // -------------------------------------------------------------------
+  // 3) SESSION RECORD FOR SIMPLE CSV EXPORT (unchanged + extended)
+  // -------------------------------------------------------------------
   const rec = {
     timestamp: new Date(pos.timestamp).toISOString(),
     latitude : c.latitude,
@@ -1097,7 +1162,11 @@ async function onPosition(pos){
     accuracy : c.accuracy,
     altitude : c.altitude === null ? '' : c.altitude,
     heading  : c.heading  === null ? '' : c.heading,
-    speed    : speedKmh / 3.6   // store filtered speed back in m/s
+    speed    : speedKmh / 3.6,          // stored as m/s
+    scenario : currentScenario,
+    online   : navigator.onLine,
+    pageVisible: document.visibilityState,
+    gapFromPrevSec
   };
   sessionRecords.push(rec);
 
@@ -1105,7 +1174,9 @@ async function onPosition(pos){
   exportBtn.disabled = false;
   copyBtn.disabled   = false;
 
-  // 2) dashboard / map point
+  // -------------------------------------------------------------------
+  // 4) DASHBOARD POINT (what goes into allTracks / investigation bundle)
+  // -------------------------------------------------------------------
   const pt = {
     lat     : c.latitude,
     lon     : c.longitude,
@@ -1114,7 +1185,11 @@ async function onPosition(pos){
     accuracy: c.accuracy,
     altitude: c.altitude,
     heading : c.heading,
-    activity: activity
+    activity: activity,
+    scenario: currentScenario,
+    online  : navigator.onLine,
+    pageVisible: document.visibilityState,
+    gapFromPrevSec
   };
 
   if(currentTrackId){
@@ -1145,6 +1220,14 @@ async function startRecording(){
     alert('Geolocation not supported in this browser.');
     return;
   }
+
+  // pick scenario label from UI (for diagnostics)
+  const scenarioEl = document.getElementById('scenarioSelect');
+  currentScenario = scenarioEl ? (scenarioEl.value || 'UNKNOWN') : 'UNKNOWN';
+
+  // reset gap tracker for this run
+  lastFixTsForGap = null;
+
   recording = true;
   sessionRecords = [];
   currentTrackId   = uuid();
