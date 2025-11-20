@@ -295,22 +295,35 @@ function calculateQualityScore(coords) {
   };
 }
 
-// NEW: Advanced spike detection (like Java version but for all dimensions)
+// NEW: Advanced spike detection (handles old + new formats)
 function detectQualityFlags(currentCoords, prevPoint) {
   const flags = [];
-  
   if (!prevPoint) return flags;
-  
-  // Time gap flag
-  const timeGap = (currentCoords.timestamp - prevPoint.raw.timestamp) / 1000;
-  if (timeGap > 30) flags.push('large_time_gap');
-  
+
+  // Handle both old and new data formats for previous point
+  const prevRaw = prevPoint.raw || {
+    lat: prevPoint.lat,
+    lon: prevPoint.lon,
+    altitude: prevPoint.altitude,
+    timestamp: prevPoint.ts
+  };
+
+  // Determine timestamps safely
+  const currentTs = typeof currentCoords.timestamp === 'number'
+    ? currentCoords.timestamp
+    : Date.now();
+
+  const timeGap = (currentTs - prevRaw.timestamp) / 1000;
+  if (Number.isFinite(timeGap) && timeGap > 30) {
+    flags.push('large_time_gap');
+  }
+
   // Position spike detection
   const distance = haversine(
-    {lat: prevPoint.raw.lat, lon: prevPoint.raw.lon},
-    {lat: currentCoords.latitude, lon: currentCoords.longitude}
+    { lat: prevRaw.lat, lon: prevRaw.lon },
+    { lat: currentCoords.latitude, lon: currentCoords.longitude }
   );
-  const timeDiff = timeGap;
+  const timeDiff = timeGap > 0 ? timeGap : 1;
   const speedMs = distance / timeDiff;
   
   if (speedMs > 50) { // ~180 km/h - physically impossible for most scenarios
@@ -320,8 +333,13 @@ function detectQualityFlags(currentCoords, prevPoint) {
   }
   
   // Altitude spike detection (like Java version)
-  if (currentCoords.altitude !== null && prevPoint.raw.altitude !== null) {
-    const altDiff = Math.abs(currentCoords.altitude - prevPoint.raw.altitude);
+  if (
+    currentCoords.altitude !== null &&
+    currentCoords.altitude !== undefined &&
+    prevRaw.altitude !== null &&
+    prevRaw.altitude !== undefined
+  ) {
+    const altDiff = Math.abs(currentCoords.altitude - prevRaw.altitude);
     const verticalSpeed = altDiff / timeDiff;
     
     if (verticalSpeed > 10) { // 10 m/s vertical speed threshold
@@ -847,10 +865,16 @@ function clearAllPolylines(){
   segmentMap = {};
 }
 
+// UPDATED: Robust drawFullTrack with validation + logging
 function drawFullTrack(tid, baseColor){
   const pts = allTracks[tid] || [];
-  if(!pts.length) return;
+  if(!pts.length) {
+    console.log(`No points for track ${tid}`);
+    return;
+  }
 
+  console.log(`Drawing track ${tid} with ${pts.length} points`);
+  
   const segments = [];
   let curAct = pts[0].filtered?.activity || pts[0].activity || classifyActivity(pts[0].filtered?.speed || pts[0].speed || 0);
   let curPts = [pts[0]];
@@ -870,27 +894,86 @@ function drawFullTrack(tid, baseColor){
   const segLayers = [];
   segments.forEach(seg=>{
     if(seg.pts.length > 1){
-      const coords = seg.pts.map(p => [p.filtered?.lat || p.lat, p.filtered?.lon || p.lon]);
-      const poly = L.polyline(coords, {
-        color: activityColor[seg.activity] || baseColor,
-        weight: 10,
-        opacity: 0.9,
-        lineCap: 'round',
-        lineJoin: 'round'
-      }).addTo(map);
-      segLayers.push(poly);
+      // SAFE COORDINATES EXTRACTION
+      const coords = seg.pts.map(p => {
+        const lat = p.filtered?.lat ?? p.lat;
+        const lon = p.filtered?.lon ?? p.lon;
+        
+        // Validate coordinates
+        if (typeof lat !== 'number' || typeof lon !== 'number' || 
+            isNaN(lat) || isNaN(lon) || lat === 0 || lon === 0) {
+          console.warn('Invalid coordinates:', p);
+          return null;
+        }
+        
+        return [lat, lon];
+      }).filter(coord => coord !== null); // Remove invalid coordinates
+      
+      if (coords.length > 1) {
+        try {
+          const poly = L.polyline(coords, {
+            color: activityColor[seg.activity] || baseColor,
+            weight: 6, // Reduced weight for better visibility
+            opacity: 0.9,
+            lineCap: 'round',
+            lineJoin: 'round'
+          }).addTo(map);
+          segLayers.push(poly);
+          console.log(`Added segment with ${coords.length} points`);
+        } catch (e) {
+          console.error('Error creating polyline:', e, coords);
+        }
+      }
     }
   });
   segmentMap[tid] = segLayers;
 
-  const baseCoords = pts.map(p => [p.filtered?.lat || p.lat, p.filtered?.lon || p.lon]);
-  const base = L.polyline(baseCoords, {
-    color: baseColor,
-    weight: 10,
-    opacity: 0.6
-  }).addTo(map);
-  base.on('click', ()=>{ toggleVisibility(tid); });
-  polylineMap[tid] = base;
+  // Base track line (thinner, behind segments)
+  const baseCoords = pts.map(p => {
+    const lat = p.filtered?.lat ?? p.lat;
+    const lon = p.filtered?.lon ?? p.lon;
+    return (typeof lat === 'number' && typeof lon === 'number' && !isNaN(lat) && !isNaN(lon)) 
+      ? [lat, lon] 
+      : null;
+  }).filter(coord => coord !== null);
+  
+  if (baseCoords.length > 1) {
+    try {
+      const base = L.polyline(baseCoords, {
+        color: baseColor,
+        weight: 3,
+        opacity: 0.6
+      }).addTo(map);
+      base.on('click', ()=>{ toggleVisibility(tid); });
+      polylineMap[tid] = base;
+      console.log(`Added base track with ${baseCoords.length} points`);
+    } catch (e) {
+      console.error('Error creating base track:', e);
+    }
+  }
+}
+
+// DEBUG helper: inspect data structures
+function debugTrackData() {
+  console.log('=== DEBUG TRACK DATA ===');
+  console.log('All tracks:', Object.keys(allTracks));
+  
+  Object.keys(allTracks).forEach(tid => {
+    const pts = allTracks[tid];
+    console.log(`Track ${tid}: ${pts.length} points`);
+    if (pts.length > 0) {
+      console.log('First point:', pts[0]);
+      console.log('Last point:', pts[pts.length-1]);
+      
+      // Check coordinates
+      const validPts = pts.filter(p => {
+        const lat = p.filtered?.lat ?? p.lat;
+        const lon = p.filtered?.lon ?? p.lon;
+        return typeof lat === 'number' && typeof lon === 'number' && !isNaN(lat) && !isNaN(lon);
+      });
+      console.log(`Valid coordinates: ${validPts.length}/${pts.length}`);
+    }
+  });
 }
 
 // ENHANCED: Drawing with quality indicators
@@ -1492,7 +1575,8 @@ async function onPosition(pos){
   // 4) ENHANCED DASHBOARD POINT (layered data structure)
   // -------------------------------------------------------------------
   const qualityAnalysis = calculateQualityScore(c);
-  const qualityFlags = detectQualityFlags(c, prevPoint);
+  const qualityInput = { ...c, timestamp: pos.timestamp };
+  const qualityFlags = detectQualityFlags(qualityInput, prevPoint);
   const confidence = calculateConfidence(c, qualityAnalysis.score, qualityFlags);
   
   const pt = {
@@ -1543,6 +1627,9 @@ async function onPosition(pos){
   pushToCharts(pt);
   detectAnomalies(pt);
   checkGeofencesForPoint(pt);
+  
+  // CRITICAL: update prevPoint for next iteration
+  prevPoint = pt;
 }
 
 function onError(err){
@@ -1739,30 +1826,72 @@ window.playTrack = function(tid){
   }, 350);
 };
 
-window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=120){
+// UPDATED SIMULATOR: safer test data + debug
+window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=50){ // Reduced points for testing
   const tid = 'sim_'+Date.now();
   const pts = [];
+  
+  console.log(`Creating simulated track at ${centerLat}, ${centerLon}`);
+  
   for(let i=0;i<n;i++){
     const angle = (i/n)*Math.PI*2;
     const lat = centerLat + Math.sin(angle)*0.01;
     const lon = centerLon + Math.cos(angle)*0.01;
-    const speed = 15 + 10*Math.abs(Math.sin(angle));
+    const speed = 5 + 5*Math.abs(Math.sin(angle)); // More realistic speeds
+    
     const p = { 
-      raw: { lat, lon, altitude: 100 + Math.sin(angle)*50, accuracy: 10, heading: 0, speed: speed/3.6, timestamp: Date.now() + i*2000 },
-      quality: { score: 85, flags: [], confidence: 0.85, suggested_action: 'keep' },
-      filtered: { lat, lon, altitude: 100 + Math.sin(angle)*50, speed, activity: classifyActivity(speed), is_quality_point: true },
-      ts: Date.now() + i*2000,
-      speed: speed,
-      activity: classifyActivity(speed)
+      raw: { 
+        lat: lat, 
+        lon: lon, 
+        altitude: 100 + Math.sin(angle)*20, 
+        accuracy: 5, 
+        heading: (angle * 180/Math.PI) % 360, 
+        speed: speed/3.6, 
+        timestamp: Date.now() + i*2000 
+      },
+      quality: { 
+        score: 85, 
+        flags: [], 
+        confidence: 0.85, 
+        suggested_action: 'keep' 
+      },
+      filtered: { 
+        lat: lat, 
+        lon: lon, 
+        altitude: 100 + Math.sin(angle)*20, 
+        speed: speed, 
+        activity: classifyActivity(speed), 
+        is_quality_point: true 
+      },
+      ts: Date.now() + i*2000
     };
     pts.push(p);
   }
+  
   await db.setItem(tid, pts);
   allTracks[tid] = pts;
-  drawFullTrack(tid, palette[Object.keys(allTracks).length % palette.length]);
-  addTrackListItem(tid, palette[Object.keys(allTracks).length % palette.length], pts.length);
+  
+  console.log(`Simulated track created with ${pts.length} points`);
+  
+  // Force redraw
+  clearAllPolylines();
+  const color = palette[Object.keys(allTracks).length % palette.length];
+  drawFullTrack(tid, color);
+  addTrackListItem(tid, color, pts.length);
   updateActivitySummary();
-  showAlert('Enhanced simulated track added');
+  
+  // Center map on the track
+  if (pts.length > 0) {
+    const firstPt = pts[0];
+    const cLat = firstPt.filtered?.lat || firstPt.lat;
+    const cLon = firstPt.filtered?.lon || firstPt.lon;
+    map.setView([cLat, cLon], 14);
+  }
+  
+  showAlert('Enhanced simulated track added - check console for debug info');
+  
+  // Debug the new track
+  debugTrackData();
 };
 
 // ---------------------------------------------------------------------
@@ -1777,6 +1906,10 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=120){
     savedGeos.forEach(g => addGeofence(g.lat, g.radius ? g.radius : g.lat, g.radius));
   }
   await loadAllTracks();
+  
+  // DEBUG: Check what's loaded
+  debugTrackData();
+  
   setTimeout(()=>{
     map.invalidateSize();
     speedChart.update();
@@ -1790,3 +1923,4 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=120){
 </script>
 </body>
 </html>
+
