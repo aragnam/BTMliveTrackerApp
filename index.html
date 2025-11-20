@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>BTM Live Tracker — Simple + Dashboard</title>
+  <title>BTM Live Tracker — Enhanced Forensic Mode</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <!-- Leaflet / libs -->
@@ -77,6 +77,16 @@
       background:#f7f7f7;padding:8px;border-radius:6px;
       overflow:auto;font-size:0.8rem;white-space:pre-wrap;
     }
+    .quality-indicator {
+      display:inline-block;
+      width:8px;
+      height:8px;
+      border-radius:50%;
+      margin-right:4px;
+    }
+    .quality-good{background:#10b981}
+    .quality-medium{background:#f59e0b}
+    .quality-poor{background:#ef4444}
     @media(max-width:900px){
       #sidebar{position:absolute;z-index:1300;height:100vh}
       #map{height:52vh}
@@ -86,9 +96,10 @@
 <body>
 <div class="app">
   <aside id="sidebar">
-    <h2 style="margin:0 0 8px 0">BTM Live Tracker</h2>
+    <h2 style="margin:0 0 8px 0">BTM Live Tracker — Forensic Mode</h2>
     <p style="font-size:0.85rem;color:#475569;margin-top:0">
       Open this page, tap <strong>Start</strong> and allow location access.
+      <br><strong>Enhanced:</strong> Raw data + Quality scoring + Layered storage
     </p>
 
     <!-- Simple-mode buttons + dashboard extras -->
@@ -188,6 +199,11 @@
         <span style="color:#dc2626">●</span> Driving
       </div>
       <div style="margin-top:6px;font-size:0.8rem">
+        Quality: <span class="quality-indicator quality-good"></span>Good 
+        <span class="quality-indicator quality-medium"></span>Medium 
+        <span class="quality-indicator quality-poor"></span>Poor
+      </div>
+      <div style="margin-top:6px;font-size:0.8rem">
         Alerts: ⚠️ sudden speed, sharp turn, route deviation, geofence
       </div>
     </div>
@@ -231,6 +247,124 @@ function classifyActivity(speedKmh){
 
 function shortTs(ts){ return new Date(ts).toLocaleTimeString(); }
 function uuid(){ return 't_'+Date.now()+'_'+Math.random().toString(36).slice(2,8); }
+
+// ---------------------------------------------------------------------
+//  ENHANCED QUALITY SCORING SYSTEM
+// ---------------------------------------------------------------------
+
+// NEW: Comprehensive quality scoring
+function calculateQualityScore(coords) {
+  let score = 100;
+  const flags = [];
+  
+  // Accuracy penalty (0-100 scale)
+  if (coords.accuracy > 100) {
+    score -= 40;
+    flags.push('poor_accuracy');
+  } else if (coords.accuracy > 50) {
+    score -= 20;
+    flags.push('medium_accuracy');
+  } else if (coords.accuracy > 20) {
+    score -= 10;
+  }
+  
+  // Speed sanity check
+  const speedKmh = (coords.speed || 0) * 3.6;
+  if (speedKmh > 200) {
+    score -= 30;
+    flags.push('implausible_speed');
+  } else if (speedKmh > 100) {
+    score -= 15;
+    flags.push('high_speed');
+  }
+  
+  // Altitude sanity (if available)
+  if (coords.altitude !== null) {
+    if (coords.altitude > 10000 || coords.altitude < -500) {
+      score -= 25;
+      flags.push('implausible_altitude');
+    } else if (coords.altitude > 5000 || coords.altitude < -100) {
+      score -= 10;
+      flags.push('extreme_altitude');
+    }
+  }
+  
+  return {
+    score: Math.max(0, score),
+    flags: flags
+  };
+}
+
+// NEW: Advanced spike detection (like Java version but for all dimensions)
+function detectQualityFlags(currentCoords, prevPoint) {
+  const flags = [];
+  
+  if (!prevPoint) return flags;
+  
+  // Time gap flag
+  const timeGap = (currentCoords.timestamp - prevPoint.raw.timestamp) / 1000;
+  if (timeGap > 30) flags.push('large_time_gap');
+  
+  // Position spike detection
+  const distance = haversine(
+    {lat: prevPoint.raw.lat, lon: prevPoint.raw.lon},
+    {lat: currentCoords.latitude, lon: currentCoords.longitude}
+  );
+  const timeDiff = timeGap;
+  const speedMs = distance / timeDiff;
+  
+  if (speedMs > 50) { // ~180 km/h - physically impossible for most scenarios
+    flags.push('position_spike');
+  } else if (speedMs > 30) { // ~108 km/h - very high speed
+    flags.push('high_speed_jump');
+  }
+  
+  // Altitude spike detection (like Java version)
+  if (currentCoords.altitude !== null && prevPoint.raw.altitude !== null) {
+    const altDiff = Math.abs(currentCoords.altitude - prevPoint.raw.altitude);
+    const verticalSpeed = altDiff / timeDiff;
+    
+    if (verticalSpeed > 10) { // 10 m/s vertical speed threshold
+      flags.push('altitude_spike');
+    } else if (verticalSpeed > 5) { // 5 m/s - still quite high
+      flags.push('rapid_altitude_change');
+    }
+  }
+  
+  return flags;
+}
+
+// NEW: Altitude filtering
+function filterAltitude(currentAlt, prevPoint) {
+  if (currentAlt === null) return null;
+  
+  if (!prevPoint) return currentAlt;
+  
+  // Simple spike removal for altitude
+  const prevAlt = prevPoint.filtered?.altitude || prevPoint.raw?.altitude;
+  if (prevAlt === null || prevAlt === undefined) return currentAlt;
+  
+  const altDiff = Math.abs(currentAlt - prevAlt);
+  const timeDiff = (Date.now() - prevPoint.ts) / 1000;
+  
+  if (timeDiff > 0 && (altDiff / timeDiff) > 5) { // 5 m/s vertical speed max
+    return prevAlt; // Return previous value instead of spike
+  }
+  
+  return currentAlt;
+}
+
+// NEW: Calculate confidence based on multiple factors
+function calculateConfidence(coords, qualityScore, flags) {
+  let confidence = qualityScore / 100;
+  
+  // Reduce confidence for specific flags
+  if (flags.includes('position_spike')) confidence *= 0.3;
+  if (flags.includes('altitude_spike')) confidence *= 0.5;
+  if (flags.includes('implausible_speed')) confidence *= 0.2;
+  
+  return Math.max(0, Math.min(1, confidence));
+}
 
 // ---------------------------------------------------------------------
 //  MAP INIT  (online-aware tiles)
@@ -494,7 +628,7 @@ function pushToCharts(pt){
     speedChart.data.datasets.forEach(ds => ds.data.shift());
   }
   speedChart.data.labels.push(lbl);
-  speedChart.data.datasets[0].data.push(pt.speed || 0);
+  speedChart.data.datasets[0].data.push(pt.filtered?.speed || pt.speed || 0);
   speedChart.data.datasets[1].data.push(pt._bearing || 0);
   speedChart.update('none');
 
@@ -505,7 +639,7 @@ function pushToCharts(pt){
   }
   activityChart.data.labels.push(lbl);
   activityChart.data.datasets[0].data.push(1);
-  activityChart.data.datasets[0].backgroundColor.push(activityColor[pt.activity] || '#888');
+  activityChart.data.datasets[0].backgroundColor.push(activityColor[pt.filtered?.activity || pt.activity] || '#888');
   activityChart.update('none');
 }
 
@@ -595,7 +729,7 @@ function updateActivitySummary(){
       const prev = pts[i-1];
       const cur  = pts[i];
 
-      const act = prev.activity || classifyActivity(prev.speed || 0);
+      const act = prev.filtered?.activity || prev.activity || classifyActivity(prev.filtered?.speed || prev.speed || 0);
 
       let tPrev = typeof prev.ts === 'number' ? prev.ts : Date.parse(prev.ts);
       let tCur  = typeof cur.ts  === 'number' ? cur.ts  : Date.parse(cur.ts);
@@ -649,7 +783,49 @@ async function savePoint(trackId, point){
 async function loadAllTracks(){
   allTracks = {};
   await db.iterate((value, key) => {
-    if(key !== '__geofences__') allTracks[key] = value;
+    if(key !== '__geofences__') {
+      // Add quality analysis to existing points if missing
+      const enhancedPoints = value.map(point => {
+        if (point.raw && point.quality) {
+          return point; // Already enhanced
+        }
+        // Convert old format to new layered format
+        return {
+          raw: {
+            lat: point.lat,
+            lon: point.lon,
+            altitude: point.altitude,
+            accuracy: point.accuracy,
+            heading: point.heading,
+            speed: point.speed,
+            timestamp: point.ts
+          },
+          quality: calculateQualityScore({
+            latitude: point.lat,
+            longitude: point.lon,
+            altitude: point.altitude,
+            accuracy: point.accuracy,
+            heading: point.heading,
+            speed: point.speed
+          }),
+          filtered: {
+            lat: point.lat,
+            lon: point.lon,
+            altitude: point.altitude,
+            speed: point.speed,
+            activity: point.activity,
+            is_quality_point: true
+          },
+          // Preserve existing metadata
+          ts: point.ts,
+          scenario: point.scenario,
+          online: point.online,
+          pageVisible: point.pageVisible,
+          gapFromPrevSec: point.gapFromPrevSec
+        };
+      });
+      allTracks[key] = enhancedPoints;
+    }
   });
 
   clearAllPolylines();
@@ -676,11 +852,11 @@ function drawFullTrack(tid, baseColor){
   if(!pts.length) return;
 
   const segments = [];
-  let curAct = pts[0].activity || classifyActivity(pts[0].speed || 0);
+  let curAct = pts[0].filtered?.activity || pts[0].activity || classifyActivity(pts[0].filtered?.speed || pts[0].speed || 0);
   let curPts = [pts[0]];
 
   for(let i=1;i<pts.length;i++){
-    const a = pts[i].activity || classifyActivity(pts[i].speed || 0);
+    const a = pts[i].filtered?.activity || pts[i].activity || classifyActivity(pts[i].filtered?.speed || pts[i].speed || 0);
     if(a === curAct){
       curPts.push(pts[i]);
     } else {
@@ -694,7 +870,7 @@ function drawFullTrack(tid, baseColor){
   const segLayers = [];
   segments.forEach(seg=>{
     if(seg.pts.length > 1){
-      const coords = seg.pts.map(p => [p.lat, p.lon]);
+      const coords = seg.pts.map(p => [p.filtered?.lat || p.lat, p.filtered?.lon || p.lon]);
       const poly = L.polyline(coords, {
         color: activityColor[seg.activity] || baseColor,
         weight: 10,
@@ -707,7 +883,7 @@ function drawFullTrack(tid, baseColor){
   });
   segmentMap[tid] = segLayers;
 
-  const baseCoords = pts.map(p => [p.lat, p.lon]);
+  const baseCoords = pts.map(p => [p.filtered?.lat || p.lat, p.filtered?.lon || p.lon]);
   const base = L.polyline(baseCoords, {
     color: baseColor,
     weight: 10,
@@ -717,17 +893,48 @@ function drawFullTrack(tid, baseColor){
   polylineMap[tid] = base;
 }
 
+// ENHANCED: Drawing with quality indicators
 function drawLivePoint(point){
   if(!currentPolyline){
     currentPolyline = L.polyline([], {
-      color: activityColor[point.activity] || '#1f77b4',
+      color: activityColor[point.filtered?.activity || point.activity] || '#1f77b4',
       weight: 10,
       lineCap: 'round',
       lineJoin: 'round'
     }).addTo(map);
   }
-  currentPolyline.addLatLng([point.lat, point.lon]);
-  liveMarker.setLatLng([point.lat, point.lon]);
+  
+  const useLat = point.filtered?.lat || point.lat;
+  const useLon = point.filtered?.lon || point.lon;
+  
+  currentPolyline.addLatLng([useLat, useLon]);
+  
+  // Update marker with quality indicator
+  const quality = point.quality?.score || 100;
+  let color = '#3b82f6'; // Good quality - blue
+  let qualityClass = 'quality-good';
+  if (quality < 60) {
+    color = '#f59e0b'; // Medium quality - amber
+    qualityClass = 'quality-medium';
+  }  
+  if (quality < 30) {
+    color = '#ef4444'; // Poor quality - red
+    qualityClass = 'quality-poor';
+  }
+  
+  liveMarker.setLatLng([useLat, useLon]);
+  liveMarker.setStyle({
+    fillColor: color,
+    color: color
+  });
+  
+  // Enhanced popup with quality info
+  const flags = point.quality?.flags || [];
+  const popupText = `Quality: ${quality}%<br>
+Flags: ${flags.length > 0 ? flags.join(', ') : 'none'}<br>
+Lat: ${useLat.toFixed(6)}<br>
+Lon: ${useLon.toFixed(6)}`;
+  liveMarker.bindPopup(popupText);
 }
 
 // ---------------------------------------------------------------------
@@ -791,14 +998,34 @@ window.toggleVisibility = toggleVisibility;
 async function exportTrackCSV(tid){
   const pts = allTracks[tid];
   if(!pts) return alert('No points for this track.');
-  let csv = 'lat,lon,ts,speed,activity\n';
+  let csv = 'timestamp,raw_lat,raw_lon,filtered_lat,filtered_lon,raw_altitude,filtered_altitude,raw_speed_ms,filtered_speed_kmh,accuracy,heading,activity,quality_score,quality_flags,scenario,online,pageVisible,gapFromPrevSec\n';
   pts.forEach(p => {
-    csv += `${p.lat},${p.lon},${p.ts},${p.speed||''},${p.activity||''}\n`;
+    const flags = p.quality?.flags?.join(';') || '';
+    csv += [
+      new Date(p.ts).toISOString(),
+      p.raw?.lat ?? p.lat,
+      p.raw?.lon ?? p.lon,
+      p.filtered?.lat ?? p.lat,
+      p.filtered?.lon ?? p.lon,
+      p.raw?.altitude ?? p.altitude,
+      p.filtered?.altitude ?? p.altitude,
+      p.raw?.speed ?? '',
+      p.filtered?.speed ?? p.speed,
+      p.raw?.accuracy ?? p.accuracy,
+      p.raw?.heading ?? p.heading,
+      p.filtered?.activity ?? p.activity,
+      p.quality?.score ?? '',
+      flags,
+      p.scenario ?? '',
+      p.online ?? '',
+      p.pageVisible ?? '',
+      p.gapFromPrevSec ?? ''
+    ].join(',') + '\n';
   });
   const blob = new Blob([csv], { type:'text/csv' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `${tid}.csv`;
+  a.download = `${tid}_enhanced.csv`;
   a.click();
 }
 async function exportTrackGPX(tid){
@@ -808,11 +1035,17 @@ async function exportTrackGPX(tid){
     type:'FeatureCollection',
     features: pts.map(p=>({
       type:'Feature',
-      geometry:{ type:'Point', coordinates:[p.lon,p.lat] },
-      properties:{ ts:p.ts, speed:p.speed, activity:p.activity }
+      geometry:{ type:'Point', coordinates:[p.filtered?.lon || p.lon, p.filtered?.lat || p.lat] },
+      properties:{ 
+        ts:p.ts, 
+        speed:p.filtered?.speed || p.speed, 
+        activity:p.filtered?.activity || p.activity,
+        quality_score: p.quality?.score,
+        quality_flags: p.quality?.flags?.join(';')
+      }
     }))
   };
-  const gpx = togpx(geojson, { creator:'BTMLiveTracker' });
+  const gpx = togpx(geojson, { creator:'BTMLiveTracker_Enhanced' });
   const blob = new Blob([gpx], { type:'application/gpx+xml' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -834,7 +1067,7 @@ window.exportTrackGPX = exportTrackGPX;
 window.deleteTrack    = deleteTrack;
 
 // ---------------------------------------------------------------------
-//  INVESTIGATION BUNDLE (ZIP)
+//  ENHANCED INVESTIGATION BUNDLE (ZIP)
 // ---------------------------------------------------------------------
 function buildInvestigationBundle(){
   if (Object.keys(allTracks).length === 0){
@@ -844,20 +1077,31 @@ function buildInvestigationBundle(){
 
   const zip = new JSZip();
 
-  // 1) Raw points across all tracks (CSV) - UPDATED HEADER
-  let csv = 'track,lat,lon,ts,speed_kmh,activity,accuracy,altitude,heading,scenario,online,pageVisible,gapFromPrevSec\n';
+  // 1) ENHANCED CSV with both raw and filtered data
+  let csv = 'track,timestamp,raw_lat,raw_lon,filtered_lat,filtered_lon,';
+  csv += 'raw_altitude,filtered_altitude,raw_speed_ms,filtered_speed_kmh,';
+  csv += 'accuracy,heading,activity,quality_score,quality_flags,';
+  csv += 'scenario,online,pageVisible,gapFromPrevSec\n';
+  
   for (const tid of Object.keys(allTracks)){
-    (allTracks[tid] || []).forEach(p=>{
+    (allTracks[tid] || []).forEach(p => {
+      const flags = p.quality?.flags?.join(';') || '';
       csv += [
         tid,
-        p.lat,
-        p.lon,
         new Date(p.ts).toISOString(),
-        p.speed ?? '',
-        p.activity ?? '',
-        p.accuracy ?? '',
-        p.altitude ?? '',
-        p.heading ?? '',
+        p.raw?.lat ?? p.lat,
+        p.raw?.lon ?? p.lon,
+        p.filtered?.lat ?? p.lat,
+        p.filtered?.lon ?? p.lon,
+        p.raw?.altitude ?? p.altitude,
+        p.filtered?.altitude ?? p.altitude,
+        p.raw?.speed ?? '',
+        p.filtered?.speed ?? p.speed,
+        p.raw?.accuracy ?? p.accuracy,
+        p.raw?.heading ?? p.heading,
+        p.filtered?.activity ?? p.activity,
+        p.quality?.score ?? '',
+        flags,
         p.scenario ?? '',
         p.online ?? '',
         p.pageVisible ?? '',
@@ -865,7 +1109,7 @@ function buildInvestigationBundle(){
       ].join(',') + '\n';
     });
   }
-  zip.file('tracks_points.csv', csv);
+  zip.file('tracks_enhanced.csv', csv);
 
   // 2) Per-track stats (JSON)
   const stats = {};
@@ -879,11 +1123,23 @@ function buildInvestigationBundle(){
 
     let distM = 0;
     const activityTime = {};
+    const qualityStats = { excellent:0, good:0, medium:0, poor:0 };
+    
     for (let i=1;i<pts.length;i++){
-      distM += haversine(pts[i-1], pts[i]);
-      const act = pts[i-1].activity || 'unknown';
+      distM += haversine(
+        {lat: pts[i-1].filtered?.lat || pts[i-1].lat, lon: pts[i-1].filtered?.lon || pts[i-1].lon},
+        {lat: pts[i].filtered?.lat || pts[i].lat, lon: pts[i].filtered?.lon || pts[i].lon}
+      );
+      const act = pts[i-1].filtered?.activity || pts[i-1].activity || 'unknown';
       const dt  = (pts[i].ts - pts[i-1].ts) / 1000;
       activityTime[act] = (activityTime[act] || 0) + dt;
+      
+      // Quality categorization
+      const quality = pts[i].quality?.score || 100;
+      if (quality >= 80) qualityStats.excellent++;
+      else if (quality >= 60) qualityStats.good++;
+      else if (quality >= 40) qualityStats.medium++;
+      else qualityStats.poor++;
     }
 
     stats[tid] = {
@@ -892,10 +1148,12 @@ function buildInvestigationBundle(){
       duration_sec   : durationSec,
       distance_m     : distM,
       distance_km    : distM / 1000,
-      activity_time_sec: activityTime
+      activity_time_sec: activityTime,
+      quality_stats: qualityStats,
+      total_points: pts.length
     };
   }
-  zip.file('track_stats.json', JSON.stringify(stats, null, 2));
+  zip.file('track_stats_enhanced.json', JSON.stringify(stats, null, 2));
 
   // 3) Geofences
   const gf = geofences.map(g => ({
@@ -906,12 +1164,21 @@ function buildInvestigationBundle(){
   // 4) Event timeline (alerts + GPS gaps + online/offline)
   zip.file('events.json', JSON.stringify(eventLog, null, 2));
 
+  // 5) Quality summary
+  const qualitySummary = {
+    total_tracks: Object.keys(allTracks).length,
+    total_points: Object.values(allTracks).reduce((sum, pts) => sum + pts.length, 0),
+    generated_at: new Date().toISOString(),
+    version: 'BTM Tracker Enhanced v2.0'
+  };
+  zip.file('quality_summary.json', JSON.stringify(qualitySummary, null, 2));
+
   // Generate and download
   zip.generateAsync({type:'blob'}).then(blob=>{
     const url = URL.createObjectURL(blob);
     const a   = document.createElement('a');
     a.href = url;
-    a.download = 'btm_investigation_bundle.zip';
+    a.download = 'btm_forensic_bundle.zip';
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -941,11 +1208,23 @@ function buildCaseSummary(){
 
   let distM = 0;
   const actTime = {};
+  const qualityStats = { excellent:0, good:0, medium:0, poor:0 };
+  
   for (let i=1;i<pts.length;i++){
-    distM += haversine(pts[i-1], pts[i]);
-    const act = pts[i-1].activity || 'unknown';
+    distM += haversine(
+      {lat: pts[i-1].filtered?.lat || pts[i-1].lat, lon: pts[i-1].filtered?.lon || pts[i-1].lon},
+      {lat: pts[i].filtered?.lat || pts[i].lat, lon: pts[i].filtered?.lon || pts[i].lon}
+    );
+    const act = pts[i-1].filtered?.activity || pts[i-1].activity || 'unknown';
     const dt  = (pts[i].ts - pts[i-1].ts) / 1000;
     actTime[act] = (actTime[act] || 0) + dt;
+    
+    // Quality categorization
+    const quality = pts[i].quality?.score || 100;
+    if (quality >= 80) qualityStats.excellent++;
+    else if (quality >= 60) qualityStats.good++;
+    else if (quality >= 40) qualityStats.medium++;
+    else qualityStats.poor++;
   }
   const distKm = distM / 1000;
 
@@ -956,12 +1235,23 @@ function buildCaseSummary(){
   const firstEvent = eventLog[0];
   const lastEvent  = eventLog[eventLog.length-1];
 
+  const totalPoints = pts.length;
+  const qualityPct = cat => ((qualityStats[cat] / totalPoints) * 100).toFixed(1);
+
   let summary = '';
+  summary += `=== FORENSIC TRACK ANALYSIS ===\n\n`;
   summary += `Track ID : ${tid}\n`;
   summary += `Start time : ${start.toLocaleString()}\n`;
   summary += `End time   : ${end.toLocaleString()}\n`;
   summary += `Duration   : ${durationMin.toFixed(1)} minutes\n`;
-  summary += `Distance   : ${distKm.toFixed(3)} km\n\n`;
+  summary += `Distance   : ${distKm.toFixed(3)} km\n`;
+  summary += `Total points: ${totalPoints}\n\n`;
+
+  summary += `Data Quality Breakdown:\n`;
+  summary += `  Excellent (80-100%): ${qualityPct('excellent')}%\n`;
+  summary += `  Good (60-79%): ${qualityPct('good')}%\n`;
+  summary += `  Medium (40-59%): ${qualityPct('medium')}%\n`;
+  summary += `  Poor (0-39%): ${qualityPct('poor')}%\n\n`;
 
   summary += `Activity breakdown (by time):\n`;
   summary += `  Stationary: ${pct('stationary')}%\n`;
@@ -978,11 +1268,17 @@ function buildCaseSummary(){
     summary += `Last alert : ${lastEvent.localTime} – ${lastEvent.message}\n`;
   }
 
+  summary += `\n=== DATA COLLECTION METADATA ===\n`;
+  summary += `Collection mode: Layered storage (raw + filtered)\n`;
+  summary += `Quality scoring: Enabled\n`;
+  summary += `Spike detection: Enabled\n`;
+  summary += `Generated: ${new Date().toLocaleString()}\n`;
+
   const blob = new Blob([summary], {type:'text/plain'});
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
   a.href = url;
-  a.download = `case_summary_${tid}.txt`;
+  a.download = `forensic_summary_${tid}.txt`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -1016,10 +1312,10 @@ function checkGeofencesForPoint(pt){
 // ---------------------------------------------------------------------
 function detectAnomalies(point){
   if(prevPoint){
-    const ds = (point.speed||0) - (prevPoint.speed||0);
+    const ds = (point.filtered?.speed || point.speed || 0) - (prevPoint.filtered?.speed || prevPoint.speed || 0);
     if(ds > 20){
       showAlert('⚠️ Sudden speed increase +' + ds.toFixed(1) + ' km/h',
-        [point.lat, point.lon]);
+        [point.filtered?.lat || point.lat, point.filtered?.lon || point.lon]);
     }
 
     if(prevPoint._bearing !== undefined){
@@ -1027,7 +1323,7 @@ function detectAnomalies(point){
       const bCur  = bearing(prevPoint, point);
       const diff  = Math.abs(((bCur - bPrev + 540) % 360) - 180);
       if(diff > 90){
-        showAlert('⚠️ Sharp turn detected', [point.lat, point.lon]);
+        showAlert('⚠️ Sharp turn detected', [point.filtered?.lat || point.lat, point.filtered?.lon || point.lon]);
       }
     }
     point._bearing = bearing(prevPoint, point);
@@ -1043,7 +1339,7 @@ function detectAnomalies(point){
         if(minD < 50) break;
       }
       if(minD > 150){
-        showAlert('⚠️ Route deviation detected', [point.lat, point.lon]);
+        showAlert('⚠️ Route deviation detected', [point.filtered?.lat || point.lat, point.filtered?.lon || point.lon]);
         break;
       }
     }
@@ -1062,9 +1358,15 @@ async function trainPredictor(){
     for(let i=3;i<pts.length;i++){
       const prev3 = pts.slice(i-3,i);
       const input = [];
-      prev3.forEach(p => { input.push(p.lat, p.lon, p.speed||0); });
+      prev3.forEach(p => { 
+        input.push(
+          p.filtered?.lat || p.lat, 
+          p.filtered?.lon || p.lon, 
+          p.filtered?.speed || p.speed || 0
+        ); 
+      });
       X.push(input);
-      Y.push([pts[i].lat, pts[i].lon]);
+      Y.push([pts[i].filtered?.lat || pts[i].lat, pts[i].filtered?.lon || pts[i].lon]);
     }
   }
   if(X.length < 50){
@@ -1094,7 +1396,13 @@ async function predictNext(ptSequence){
   if(!predictorReady || !predictorModel) return null;
   if(ptSequence.length < 3) return null;
   const input = [];
-  ptSequence.slice(-3).forEach(p => { input.push(p.lat, p.lon, p.speed||0); });
+  ptSequence.slice(-3).forEach(p => { 
+    input.push(
+      p.filtered?.lat || p.lat, 
+      p.filtered?.lon || p.lon, 
+      p.filtered?.speed || p.speed || 0
+    ); 
+  });
   const t = tf.tensor2d([input]);
   const pred = predictorModel.predict(t);
   const arr  = await pred.array();
@@ -1103,19 +1411,25 @@ async function predictNext(ptSequence){
 }
 
 // ---------------------------------------------------------------------
-//  SIMPLE-MODE FORMATTER (for Latest position)
+//  ENHANCED SIMPLE-MODE FORMATTER (for Latest position)
 // ---------------------------------------------------------------------
 function formatPos(pos){
   const c = pos.coords;
+  const quality = calculateQualityScore(c);
+  const qualityClass = quality.score >= 60 ? 'quality-good' : 
+                      quality.score >= 30 ? 'quality-medium' : 'quality-poor';
+  
   return `Lat: ${c.latitude.toFixed(6)}
 Lng: ${c.longitude.toFixed(6)}
 Accuracy: ${c.accuracy} m
 Altitude: ${c.altitude === null ? 'n/a' : c.altitude + ' m'}
+Quality: <span class="quality-indicator ${qualityClass}"></span>${quality.score}%
+Flags: ${quality.flags.length > 0 ? quality.flags.join(', ') : 'none'}
 Timestamp: ${new Date(pos.timestamp).toLocaleString()}`;
 }
 
 // ---------------------------------------------------------------------
-//  MAIN GEO CALLBACK
+//  ENHANCED MAIN GEO CALLBACK
 // ---------------------------------------------------------------------
 const latestEl   = document.getElementById('latest');
 const exportBtn  = document.getElementById('exportBtn');
@@ -1170,26 +1484,53 @@ async function onPosition(pos){
   };
   sessionRecords.push(rec);
 
-  latestEl.textContent = formatPos(pos);
+  latestEl.innerHTML = formatPos(pos);
   exportBtn.disabled = false;
   copyBtn.disabled   = false;
 
   // -------------------------------------------------------------------
-  // 4) DASHBOARD POINT (what goes into allTracks / investigation bundle)
+  // 4) ENHANCED DASHBOARD POINT (layered data structure)
   // -------------------------------------------------------------------
+  const qualityAnalysis = calculateQualityScore(c);
+  const qualityFlags = detectQualityFlags(c, prevPoint);
+  const confidence = calculateConfidence(c, qualityAnalysis.score, qualityFlags);
+  
   const pt = {
-    lat     : c.latitude,
-    lon     : c.longitude,
-    ts      : Date.now(),
-    speed   : speedKmh,       // km/h (filtered)
-    accuracy: c.accuracy,
-    altitude: c.altitude,
-    heading : c.heading,
-    activity: activity,
+    // RAW LAYER - Keep everything exactly as received
+    raw: {
+      lat: c.latitude,
+      lon: c.longitude,
+      altitude: c.altitude,
+      accuracy: c.accuracy,
+      heading: c.heading,
+      speed: c.speed, // Raw m/s from GPS
+      timestamp: pos.timestamp
+    },
+    
+    // QUALITY ANALYSIS LAYER
+    quality: {
+      score: qualityAnalysis.score,
+      flags: qualityFlags,
+      confidence: confidence,
+      suggested_action: confidence > 0.7 ? 'keep' : 'review'
+    },
+    
+    // FILTERED LAYER - For display and calculations
+    filtered: {
+      lat: c.latitude,
+      lon: c.longitude, 
+      altitude: filterAltitude(c.altitude, prevPoint),
+      speed: speedKmh, // Your existing filtered speed
+      activity: activity,
+      is_quality_point: confidence > 0.5
+    },
+    
+    // METADATA (existing)
+    ts: Date.now(),
     scenario: currentScenario,
-    online  : navigator.onLine,
+    online: navigator.onLine,
     pageVisible: document.visibilityState,
-    gapFromPrevSec
+    gapFromPrevSec: gapFromPrevSec
   };
 
   if(currentTrackId){
@@ -1197,7 +1538,7 @@ async function onPosition(pos){
   }
 
   drawLivePoint(pt);
-  map.setView([pt.lat, pt.lon], 16);
+  map.setView([pt.filtered.lat, pt.filtered.lon], 16);
 
   pushToCharts(pt);
   detectAnomalies(pt);
@@ -1319,16 +1660,37 @@ document.getElementById('hideAll').addEventListener('click', ()=>{
   Object.values(segmentMap).forEach(arr => arr.forEach(s => map.removeLayer(s)));
 });
 document.getElementById('exportAll').addEventListener('click', async ()=>{
-  let csv = 'track,lat,lon,ts,speed,activity\n';
+  let csv = 'track,timestamp,raw_lat,raw_lon,filtered_lat,filtered_lon,raw_altitude,filtered_altitude,raw_speed_ms,filtered_speed_kmh,accuracy,heading,activity,quality_score,quality_flags,scenario,online,pageVisible,gapFromPrevSec\n';
   for(const tid of Object.keys(allTracks)){
     (allTracks[tid]||[]).forEach(p=>{
-      csv += `${tid},${p.lat},${p.lon},${p.ts},${p.speed||''},${p.activity||''}\n`;
+      const flags = p.quality?.flags?.join(';') || '';
+      csv += [
+        tid,
+        new Date(p.ts).toISOString(),
+        p.raw?.lat ?? p.lat,
+        p.raw?.lon ?? p.lon,
+        p.filtered?.lat ?? p.lat,
+        p.filtered?.lon ?? p.lon,
+        p.raw?.altitude ?? p.altitude,
+        p.filtered?.altitude ?? p.altitude,
+        p.raw?.speed ?? '',
+        p.filtered?.speed ?? p.speed,
+        p.raw?.accuracy ?? p.accuracy,
+        p.raw?.heading ?? p.heading,
+        p.filtered?.activity ?? p.activity,
+        p.quality?.score ?? '',
+        flags,
+        p.scenario ?? '',
+        p.online ?? '',
+        p.pageVisible ?? '',
+        p.gapFromPrevSec ?? ''
+      ].join(',') + '\n';
     });
   }
   const blob = new Blob([csv], { type:'text/csv' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'all_tracks.csv';
+  a.download = 'all_tracks_enhanced.csv';
   a.click();
 });
 document.getElementById('clearAll').addEventListener('click', async ()=>{
@@ -1361,17 +1723,17 @@ stopBtn .addEventListener('click', stopRecording);
 window.playTrack = function(tid){
   const pts = allTracks[tid];
   if(!pts || !pts.length) return alert('No points');
-  map.setView([pts[0].lat, pts[0].lon], 16);
+  map.setView([pts[0].filtered?.lat || pts[0].lat, pts[0].filtered?.lon || pts[0].lon], 16);
 
   let i=0;
-  const marker = L.circleMarker([pts[0].lat, pts[0].lon], {
+  const marker = L.circleMarker([pts[0].filtered?.lat || pts[0].lat, pts[0].filtered?.lon || pts[0].lon], {
     radius:5, color:'#111827', weight:1, fillColor:'#111827', fillOpacity:1
   }).addTo(map);
   const poly   = L.polyline([], {color:'#000', weight:10}).addTo(map);
   const iv = setInterval(()=>{
     if(i >= pts.length){ clearInterval(iv); return; }
-    poly.addLatLng([pts[i].lat, pts[i].lon]);
-    marker.setLatLng([pts[i].lat, pts[i].lon]);
+    poly.addLatLng([pts[i].filtered?.lat || pts[i].lat, pts[i].filtered?.lon || pts[i].lon]);
+    marker.setLatLng([pts[i].filtered?.lat || pts[i].lat, pts[i].filtered?.lon || pts[i].lon]);
     pushToCharts(pts[i]);
     i++;
   }, 350);
@@ -1385,8 +1747,14 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=120){
     const lat = centerLat + Math.sin(angle)*0.01;
     const lon = centerLon + Math.cos(angle)*0.01;
     const speed = 15 + 10*Math.abs(Math.sin(angle));
-    const p = { lat, lon, ts: Date.now() + i*2000, speed,
-                activity: classifyActivity(speed) };
+    const p = { 
+      raw: { lat, lon, altitude: 100 + Math.sin(angle)*50, accuracy: 10, heading: 0, speed: speed/3.6, timestamp: Date.now() + i*2000 },
+      quality: { score: 85, flags: [], confidence: 0.85, suggested_action: 'keep' },
+      filtered: { lat, lon, altitude: 100 + Math.sin(angle)*50, speed, activity: classifyActivity(speed), is_quality_point: true },
+      ts: Date.now() + i*2000,
+      speed: speed,
+      activity: classifyActivity(speed)
+    };
     pts.push(p);
   }
   await db.setItem(tid, pts);
@@ -1394,7 +1762,7 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=120){
   drawFullTrack(tid, palette[Object.keys(allTracks).length % palette.length]);
   addTrackListItem(tid, palette[Object.keys(allTracks).length % palette.length], pts.length);
   updateActivitySummary();
-  showAlert('Simulated track added');
+  showAlert('Enhanced simulated track added');
 };
 
 // ---------------------------------------------------------------------
