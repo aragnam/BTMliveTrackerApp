@@ -248,6 +248,24 @@ function classifyActivity(speedKmh){
 function shortTs(ts){ return new Date(ts).toLocaleTimeString(); }
 function uuid(){ return 't_'+Date.now()+'_'+Math.random().toString(36).slice(2,8); }
 
+// NEW: Helper: normalize lat/lon regardless of format
+function getLatLonFromPoint(p) {
+  const lat = (p.filtered && typeof p.filtered.lat === 'number')
+    ? p.filtered.lat
+    : (typeof p.lat === 'number' ? p.lat : null);
+  const lon = (p.filtered && typeof p.filtered.lon === 'number')
+    ? p.filtered.lon
+    : (typeof p.lon === 'number' ? p.lon : null);
+
+  if (
+    lat === null || lon === null ||
+    !Number.isFinite(lat) || !Number.isFinite(lon)
+  ) {
+    return null;
+  }
+  return { lat, lon };
+}
+
 // ---------------------------------------------------------------------
 //  ENHANCED QUALITY SCORING SYSTEM
 // ---------------------------------------------------------------------
@@ -326,13 +344,13 @@ function detectQualityFlags(currentCoords, prevPoint) {
   const timeDiff = timeGap > 0 ? timeGap : 1;
   const speedMs = distance / timeDiff;
   
-  if (speedMs > 50) { // ~180 km/h - physically impossible for most scenarios
+  if (speedMs > 50) { // ~180 km/h
     flags.push('position_spike');
-  } else if (speedMs > 30) { // ~108 km/h - very high speed
+  } else if (speedMs > 30) { // ~108 km/h
     flags.push('high_speed_jump');
   }
   
-  // Altitude spike detection (like Java version)
+  // Altitude spike detection
   if (
     currentCoords.altitude !== null &&
     currentCoords.altitude !== undefined &&
@@ -342,9 +360,9 @@ function detectQualityFlags(currentCoords, prevPoint) {
     const altDiff = Math.abs(currentCoords.altitude - prevRaw.altitude);
     const verticalSpeed = altDiff / timeDiff;
     
-    if (verticalSpeed > 10) { // 10 m/s vertical speed threshold
+    if (verticalSpeed > 10) { // 10 m/s
       flags.push('altitude_spike');
-    } else if (verticalSpeed > 5) { // 5 m/s - still quite high
+    } else if (verticalSpeed > 5) { // 5 m/s
       flags.push('rapid_altitude_change');
     }
   }
@@ -358,14 +376,13 @@ function filterAltitude(currentAlt, prevPoint) {
   
   if (!prevPoint) return currentAlt;
   
-  // Simple spike removal for altitude
   const prevAlt = prevPoint.filtered?.altitude || prevPoint.raw?.altitude;
   if (prevAlt === null || prevAlt === undefined) return currentAlt;
   
   const altDiff = Math.abs(currentAlt - prevAlt);
   const timeDiff = (Date.now() - prevPoint.ts) / 1000;
   
-  if (timeDiff > 0 && (altDiff / timeDiff) > 5) { // 5 m/s vertical speed max
+  if (timeDiff > 0 && (altDiff / timeDiff) > 5) { // 5 m/s max
     return prevAlt; // Return previous value instead of spike
   }
   
@@ -400,7 +417,7 @@ function addBaseLayerIfOnline(){
 function initMap(){
   map = L.map('map', { preferCanvas:true }).setView([0,0], 2);
 
-  // tiles only if online; if offline tracking still works on blank background
+  // tiles only if online
   addBaseLayerIfOnline();
   window.addEventListener('online', addBaseLayerIfOnline);
 
@@ -446,9 +463,9 @@ let currentScenario = 'UNKNOWN';
 
 // for gap detection
 let lastFixTsForGap = null;
-const GAP_THRESHOLD_SEC = 10;   // log "GPS gap" if Δt > 10 s
+const GAP_THRESHOLD_SEC = 10;
 
-// online/offline state (for event log)
+// online/offline state
 let lastOnlineState = navigator.onLine;
 
 const activityColor = {
@@ -469,58 +486,50 @@ const activityLabel = {
 const palette = ['#1f77b4','#9467bd','#8c564b','#e377c2','#17becf','#7f7f7f'];
 
 // --- extra globals for filtering noise ---
-let prevFixForSpeed = null;   // last GPS fix used for distance-based speed
-let speedWindow     = [];     // recent speeds (km/h)
+let prevFixForSpeed = null;
+let speedWindow     = [];
 let lastSmoothedSpeed = 0;
-let fastStreak      = 0;      // consecutive very fast samples
-let activityWindow  = [];     // recent activity labels
+let fastStreak      = 0;
+let activityWindow  = [];
 
-// robust speed estimate (km/h) from GPS + distance/time
+// robust speed estimate (km/h)
 function safeSpeedKmhFromFix(c){
   const now = Date.now();
   const cur = { lat: c.latitude, lon: c.longitude, t: now };
 
-  // 1) GPS-reported speed (m/s → km/h)
   let vGps = (c.speed || 0) * 3.6;
   if (!Number.isFinite(vGps)) vGps = 0;
 
-  // 2) distance-based speed from previous fix
   let vDist = null;
   if (prevFixForSpeed) {
-    const dt = (now - prevFixForSpeed.t) / 1000; // seconds
-    if (dt > 0 && dt < 60) {                     // ignore huge gaps
+    const dt = (now - prevFixForSpeed.t) / 1000;
+    if (dt > 0 && dt < 60) {
       const d = haversine(
         { lat: prevFixForSpeed.lat, lon: prevFixForSpeed.lon },
         { lat: cur.lat,            lon: cur.lon }
-      ); // metres
+      );
       const km  = d / 1000;
       const hrs = dt / 3600;
-      vDist = km / hrs;                          // km/h
+      vDist = km / hrs;
     }
   }
   prevFixForSpeed = cur;
 
-  // prefer distance-based if available, fallback to GPS speed
   let v = vDist !== null ? vDist : vGps;
   if (!Number.isFinite(v) || v < 0) v = 0;
 
-  // if accuracy is poor, don't trust big speeds
   if (c.accuracy && c.accuracy > 40) {
-    // high HDOP → treat as very slow (brisk walk max)
     v = Math.min(v, 4);
   }
 
-  // clamp completely crazy spikes
   if (v > 120) v = 120;
 
-  // 3) moving-average smoothing over last ~5 samples
   speedWindow.push(v);
   if (speedWindow.length > 5) speedWindow.shift();
   let avg = speedWindow.reduce((a,b)=>a+b,0) / speedWindow.length;
 
-  // 4) prevent huge jumps from one sample to the next
   if (lastSmoothedSpeed !== null){
-    const maxDelta = 5; // km/h per sample (very conservative)
+    const maxDelta = 5;
     const delta    = avg - lastSmoothedSpeed;
     if (Math.abs(delta) > maxDelta){
       avg = lastSmoothedSpeed + Math.sign(delta) * maxDelta;
@@ -531,41 +540,34 @@ function safeSpeedKmhFromFix(c){
   return avg;
 }
 
-// VERY conservative classifier: treat almost everything as walking
+// conservative classifier
 function classifyActivityFromSpeed(speedKmh){
   if (!Number.isFinite(speedKmh)) speedKmh = 0;
 
-  // almost zero → stationary
   if (speedKmh < 0.5){
     fastStreak = 0;
     return 'stationary';
   }
-
-  // up to ~7 km/h → walking
   if (speedKmh < 7){
     fastStreak = 0;
     return 'walking';
   }
 
-  // candidate fast segment – only count really fast speeds
   if (speedKmh > 20){
     fastStreak++;
   } else {
-    // decay streak slowly if we dip below 20
     fastStreak = Math.max(0, fastStreak - 1);
   }
 
-  // ONLY if we see many consecutive very fast samples do we upgrade
   if (fastStreak >= 10){
     if (speedKmh > 45) return 'driving';
     return 'cycling';
   }
 
-  // until then, treat as walking (suppresses GPS spikes)
   return 'walking';
 }
 
-// temporal smoothing: majority of last N labels
+// majority of last N labels
 function smoothActivity(raw){
   activityWindow.push(raw);
   if (activityWindow.length > 7) activityWindow.shift();
@@ -671,7 +673,6 @@ function showAlert(msg, latlng){
   el.textContent = msg;
   setTimeout(()=>{ if(el.textContent === msg) el.textContent = ''; }, 6000);
 
-  // investigator event log
   eventLog.push({
     ts,
     localTime: new Date(ts).toLocaleString(),
@@ -725,7 +726,7 @@ window.addEventListener('offline', () => {
 });
 
 // ---------------------------------------------------------------------
-//  ACTIVITY SUMMARY (time per class, all tracks)
+//  ACTIVITY SUMMARY
 // ---------------------------------------------------------------------
 function updateActivitySummary(){
   const el = document.getElementById('activitySummary');
@@ -739,7 +740,6 @@ function updateActivitySummary(){
     driving:0
   };
 
-  // accumulate time from consecutive points per track
   for(const tid of Object.keys(allTracks)){
     const pts = allTracks[tid];
     if(!pts || pts.length < 2) continue;
@@ -802,12 +802,10 @@ async function loadAllTracks(){
   allTracks = {};
   await db.iterate((value, key) => {
     if(key !== '__geofences__') {
-      // Add quality analysis to existing points if missing
       const enhancedPoints = value.map(point => {
         if (point.raw && point.quality) {
-          return point; // Already enhanced
+          return point;
         }
-        // Convert old format to new layered format
         return {
           raw: {
             lat: point.lat,
@@ -834,7 +832,6 @@ async function loadAllTracks(){
             activity: point.activity,
             is_quality_point: true
           },
-          // Preserve existing metadata
           ts: point.ts,
           scenario: point.scenario,
           online: point.online,
@@ -865,16 +862,16 @@ function clearAllPolylines(){
   segmentMap = {};
 }
 
-// UPDATED: Robust drawFullTrack with validation + logging
+// UPDATED: Loud drawFullTrack with centering + start marker
 function drawFullTrack(tid, baseColor){
   const pts = allTracks[tid] || [];
   if(!pts.length) {
-    console.log(`No points for track ${tid}`);
+    console.log(`[drawFullTrack] No points for track ${tid}`);
     return;
   }
 
-  console.log(`Drawing track ${tid} with ${pts.length} points`);
-  
+  console.log(`[drawFullTrack] Drawing track ${tid} with ${pts.length} points`);
+
   const segments = [];
   let curAct = pts[0].filtered?.activity || pts[0].activity || classifyActivity(pts[0].filtered?.speed || pts[0].speed || 0);
   let curPts = [pts[0]];
@@ -894,62 +891,68 @@ function drawFullTrack(tid, baseColor){
   const segLayers = [];
   segments.forEach(seg=>{
     if(seg.pts.length > 1){
-      // SAFE COORDINATES EXTRACTION
       const coords = seg.pts.map(p => {
-        const lat = p.filtered?.lat ?? p.lat;
-        const lon = p.filtered?.lon ?? p.lon;
-        
-        // Validate coordinates
-        if (typeof lat !== 'number' || typeof lon !== 'number' || 
-            isNaN(lat) || isNaN(lon) || lat === 0 || lon === 0) {
-          console.warn('Invalid coordinates:', p);
+        const ll = getLatLonFromPoint(p);
+        if (!ll) {
+          console.warn('[drawFullTrack] Invalid point in segment:', p);
           return null;
         }
-        
-        return [lat, lon];
-      }).filter(coord => coord !== null); // Remove invalid coordinates
-      
+        return [ll.lat, ll.lon];
+      }).filter(Boolean);
+
       if (coords.length > 1) {
         try {
           const poly = L.polyline(coords, {
-            color: activityColor[seg.activity] || baseColor,
-            weight: 6, // Reduced weight for better visibility
-            opacity: 0.9,
+            color: activityColor[seg.activity] || baseColor || '#ff0000',
+            weight: 8,
+            opacity: 1.0,
             lineCap: 'round',
             lineJoin: 'round'
           }).addTo(map);
           segLayers.push(poly);
-          console.log(`Added segment with ${coords.length} points`);
+          console.log(`[drawFullTrack] Added segment (${seg.activity}) with ${coords.length} points`);
         } catch (e) {
-          console.error('Error creating polyline:', e, coords);
+          console.error('[drawFullTrack] Error creating segment polyline:', e, coords);
         }
       }
     }
   });
   segmentMap[tid] = segLayers;
 
-  // Base track line (thinner, behind segments)
   const baseCoords = pts.map(p => {
-    const lat = p.filtered?.lat ?? p.lat;
-    const lon = p.filtered?.lon ?? p.lon;
-    return (typeof lat === 'number' && typeof lon === 'number' && !isNaN(lat) && !isNaN(lon)) 
-      ? [lat, lon] 
-      : null;
-  }).filter(coord => coord !== null);
-  
+    const ll = getLatLonFromPoint(p);
+    return ll ? [ll.lat, ll.lon] : null;
+  }).filter(Boolean);
+
   if (baseCoords.length > 1) {
     try {
       const base = L.polyline(baseCoords, {
-        color: baseColor,
-        weight: 3,
-        opacity: 0.6
+        color: baseColor || '#000000',
+        weight: 4,
+        opacity: 0.8
       }).addTo(map);
       base.on('click', ()=>{ toggleVisibility(tid); });
       polylineMap[tid] = base;
-      console.log(`Added base track with ${baseCoords.length} points`);
+      console.log(`[drawFullTrack] Added base track with ${baseCoords.length} points`);
+
+      const first = baseCoords[0];
+      L.circleMarker(first, {
+        radius: 10,
+        color: '#ff0000',
+        weight: 3,
+        fillColor: '#ff0000',
+        fillOpacity: 1
+      }).addTo(map).bindPopup(`Track start: ${tid}`);
+
+      const bounds = base.getBounds();
+      map.fitBounds(bounds, { padding: [40, 40] });
+      console.log('[drawFullTrack] Auto-centered map on track', tid, 'bounds=', bounds);
+
     } catch (e) {
-      console.error('Error creating base track:', e);
+      console.error('[drawFullTrack] Error creating base track polyline:', e);
     }
+  } else {
+    console.warn('[drawFullTrack] Not enough valid baseCoords to draw track', tid);
   }
 }
 
@@ -965,11 +968,9 @@ function debugTrackData() {
       console.log('First point:', pts[0]);
       console.log('Last point:', pts[pts.length-1]);
       
-      // Check coordinates
       const validPts = pts.filter(p => {
-        const lat = p.filtered?.lat ?? p.lat;
-        const lon = p.filtered?.lon ?? p.lon;
-        return typeof lat === 'number' && typeof lon === 'number' && !isNaN(lat) && !isNaN(lon);
+        const ll = getLatLonFromPoint(p);
+        return !!ll;
       });
       console.log(`Valid coordinates: ${validPts.length}/${pts.length}`);
     }
@@ -987,36 +988,34 @@ function drawLivePoint(point){
     }).addTo(map);
   }
   
-  const useLat = point.filtered?.lat || point.lat;
-  const useLon = point.filtered?.lon || point.lon;
-  
-  currentPolyline.addLatLng([useLat, useLon]);
-  
-  // Update marker with quality indicator
-  const quality = point.quality?.score || 100;
-  let color = '#3b82f6'; // Good quality - blue
-  let qualityClass = 'quality-good';
-  if (quality < 60) {
-    color = '#f59e0b'; // Medium quality - amber
-    qualityClass = 'quality-medium';
-  }  
-  if (quality < 30) {
-    color = '#ef4444'; // Poor quality - red
-    qualityClass = 'quality-poor';
+  const ll = getLatLonFromPoint(point);
+  if (!ll) {
+    console.warn('[drawLivePoint] Invalid point, skipping', point);
+    return;
   }
   
-  liveMarker.setLatLng([useLat, useLon]);
+  currentPolyline.addLatLng([ll.lat, ll.lon]);
+  
+  const quality = point.quality?.score || 100;
+  let color = '#3b82f6';
+  if (quality < 60) {
+    color = '#f59e0b';
+  }  
+  if (quality < 30) {
+    color = '#ef4444';
+  }
+  
+  liveMarker.setLatLng([ll.lat, ll.lon]);
   liveMarker.setStyle({
     fillColor: color,
     color: color
   });
   
-  // Enhanced popup with quality info
   const flags = point.quality?.flags || [];
   const popupText = `Quality: ${quality}%<br>
 Flags: ${flags.length > 0 ? flags.join(', ') : 'none'}<br>
-Lat: ${useLat.toFixed(6)}<br>
-Lon: ${useLon.toFixed(6)}`;
+Lat: ${ll.lat.toFixed(6)}<br>
+Lon: ${ll.lon.toFixed(6)}`;
   liveMarker.bindPopup(popupText);
 }
 
@@ -1160,7 +1159,6 @@ function buildInvestigationBundle(){
 
   const zip = new JSZip();
 
-  // 1) ENHANCED CSV with both raw and filtered data
   let csv = 'track,timestamp,raw_lat,raw_lon,filtered_lat,filtered_lon,';
   csv += 'raw_altitude,filtered_altitude,raw_speed_ms,filtered_speed_kmh,';
   csv += 'accuracy,heading,activity,quality_score,quality_flags,';
@@ -1194,7 +1192,6 @@ function buildInvestigationBundle(){
   }
   zip.file('tracks_enhanced.csv', csv);
 
-  // 2) Per-track stats (JSON)
   const stats = {};
   for (const tid of Object.keys(allTracks)){
     const pts = allTracks[tid];
@@ -1217,7 +1214,6 @@ function buildInvestigationBundle(){
       const dt  = (pts[i].ts - pts[i-1].ts) / 1000;
       activityTime[act] = (activityTime[act] || 0) + dt;
       
-      // Quality categorization
       const quality = pts[i].quality?.score || 100;
       if (quality >= 80) qualityStats.excellent++;
       else if (quality >= 60) qualityStats.good++;
@@ -1238,16 +1234,13 @@ function buildInvestigationBundle(){
   }
   zip.file('track_stats_enhanced.json', JSON.stringify(stats, null, 2));
 
-  // 3) Geofences
   const gf = geofences.map(g => ({
     lat: g.lat, lon: g.lon, radius_m: g.radius
   }));
   zip.file('geofences.json', JSON.stringify(gf, null, 2));
 
-  // 4) Event timeline (alerts + GPS gaps + online/offline)
   zip.file('events.json', JSON.stringify(eventLog, null, 2));
 
-  // 5) Quality summary
   const qualitySummary = {
     total_tracks: Object.keys(allTracks).length,
     total_points: Object.values(allTracks).reduce((sum, pts) => sum + pts.length, 0),
@@ -1256,7 +1249,6 @@ function buildInvestigationBundle(){
   };
   zip.file('quality_summary.json', JSON.stringify(qualitySummary, null, 2));
 
-  // Generate and download
   zip.generateAsync({type:'blob'}).then(blob=>{
     const url = URL.createObjectURL(blob);
     const a   = document.createElement('a');
@@ -1278,7 +1270,7 @@ function buildCaseSummary(){
     alert('No tracks recorded yet.');
     return;
   }
-  const tid = tids.sort().slice(-1)[0];  // last track
+  const tid = tids.sort().slice(-1)[0];
   const pts = allTracks[tid];
   if (!pts || pts.length < 2){
     alert('Track too short for summary.');
@@ -1302,7 +1294,6 @@ function buildCaseSummary(){
     const dt  = (pts[i].ts - pts[i-1].ts) / 1000;
     actTime[act] = (actTime[act] || 0) + dt;
     
-    // Quality categorization
     const quality = pts[i].quality?.score || 100;
     if (quality >= 80) qualityStats.excellent++;
     else if (quality >= 60) qualityStats.good++;
@@ -1411,7 +1402,6 @@ function detectAnomalies(point){
     }
     point._bearing = bearing(prevPoint, point);
 
-    // route deviation vs historical tracks
     for(const histId of Object.keys(allTracks)){
       const hist = allTracks[histId];
       if(!hist || hist.length < 10) continue;
@@ -1431,7 +1421,7 @@ function detectAnomalies(point){
 }
 
 // ---------------------------------------------------------------------
-//  AI PREDICTOR (TF.JS) – OPTIONAL
+//  AI PREDICTOR (TF.JS)
 // ---------------------------------------------------------------------
 async function trainPredictor(){
   const X = [], Y = [];
@@ -1442,14 +1432,16 @@ async function trainPredictor(){
       const prev3 = pts.slice(i-3,i);
       const input = [];
       prev3.forEach(p => { 
+        const ll = getLatLonFromPoint(p) || {lat:0, lon:0};
         input.push(
-          p.filtered?.lat || p.lat, 
-          p.filtered?.lon || p.lon, 
+          ll.lat, 
+          ll.lon, 
           p.filtered?.speed || p.speed || 0
         ); 
       });
       X.push(input);
-      Y.push([pts[i].filtered?.lat || pts[i].lat, pts[i].filtered?.lon || pts[i].lon]);
+      const cur = getLatLonFromPoint(pts[i]) || {lat:0, lon:0};
+      Y.push([cur.lat, cur.lon]);
     }
   }
   if(X.length < 50){
@@ -1480,9 +1472,10 @@ async function predictNext(ptSequence){
   if(ptSequence.length < 3) return null;
   const input = [];
   ptSequence.slice(-3).forEach(p => { 
+    const ll = getLatLonFromPoint(p) || {lat:0, lon:0};
     input.push(
-      p.filtered?.lat || p.lat, 
-      p.filtered?.lon || p.lon, 
+      ll.lat, 
+      ll.lon, 
       p.filtered?.speed || p.speed || 0
     ); 
   });
@@ -1494,7 +1487,7 @@ async function predictNext(ptSequence){
 }
 
 // ---------------------------------------------------------------------
-//  ENHANCED SIMPLE-MODE FORMATTER (for Latest position)
+//  ENHANCED SIMPLE-MODE FORMATTER
 // ---------------------------------------------------------------------
 function formatPos(pos){
   const c = pos.coords;
@@ -1521,16 +1514,10 @@ const copyBtn    = document.getElementById('copyBtn');
 async function onPosition(pos){
   const c = pos.coords;
 
-  // -------------------------------------------------------------------
-  // 1) SPEED + ACTIVITY (already robust, keep as is)
-  // -------------------------------------------------------------------
   const speedKmh     = safeSpeedKmhFromFix(c);
   const rawActivity  = classifyActivityFromSpeed(speedKmh);
   const activity     = smoothActivity(rawActivity);
 
-  // -------------------------------------------------------------------
-  // 2) GAP DETECTION (diagnostic)
-  // -------------------------------------------------------------------
   let gapFromPrevSec = null;
   if (lastFixTsForGap !== null) {
     gapFromPrevSec = (pos.timestamp - lastFixTsForGap) / 1000;
@@ -1549,9 +1536,6 @@ async function onPosition(pos){
   }
   lastFixTsForGap = pos.timestamp;
 
-  // -------------------------------------------------------------------
-  // 3) SESSION RECORD FOR SIMPLE CSV EXPORT (unchanged + extended)
-  // -------------------------------------------------------------------
   const rec = {
     timestamp: new Date(pos.timestamp).toISOString(),
     latitude : c.latitude,
@@ -1559,7 +1543,7 @@ async function onPosition(pos){
     accuracy : c.accuracy,
     altitude : c.altitude === null ? '' : c.altitude,
     heading  : c.heading  === null ? '' : c.heading,
-    speed    : speedKmh / 3.6,          // stored as m/s
+    speed    : speedKmh / 3.6,
     scenario : currentScenario,
     online   : navigator.onLine,
     pageVisible: document.visibilityState,
@@ -1571,45 +1555,35 @@ async function onPosition(pos){
   exportBtn.disabled = false;
   copyBtn.disabled   = false;
 
-  // -------------------------------------------------------------------
-  // 4) ENHANCED DASHBOARD POINT (layered data structure)
-  // -------------------------------------------------------------------
   const qualityAnalysis = calculateQualityScore(c);
   const qualityInput = { ...c, timestamp: pos.timestamp };
   const qualityFlags = detectQualityFlags(qualityInput, prevPoint);
   const confidence = calculateConfidence(c, qualityAnalysis.score, qualityFlags);
   
   const pt = {
-    // RAW LAYER - Keep everything exactly as received
     raw: {
       lat: c.latitude,
       lon: c.longitude,
       altitude: c.altitude,
       accuracy: c.accuracy,
       heading: c.heading,
-      speed: c.speed, // Raw m/s from GPS
+      speed: c.speed,
       timestamp: pos.timestamp
     },
-    
-    // QUALITY ANALYSIS LAYER
     quality: {
       score: qualityAnalysis.score,
       flags: qualityFlags,
       confidence: confidence,
       suggested_action: confidence > 0.7 ? 'keep' : 'review'
     },
-    
-    // FILTERED LAYER - For display and calculations
     filtered: {
       lat: c.latitude,
       lon: c.longitude, 
       altitude: filterAltitude(c.altitude, prevPoint),
-      speed: speedKmh, // Your existing filtered speed
+      speed: speedKmh,
       activity: activity,
       is_quality_point: confidence > 0.5
     },
-    
-    // METADATA (existing)
     ts: Date.now(),
     scenario: currentScenario,
     online: navigator.onLine,
@@ -1622,13 +1596,15 @@ async function onPosition(pos){
   }
 
   drawLivePoint(pt);
-  map.setView([pt.filtered.lat, pt.filtered.lon], 16);
+  const ll = getLatLonFromPoint(pt);
+  if (ll) {
+    map.setView([ll.lat, ll.lon], 16);
+  }
 
   pushToCharts(pt);
   detectAnomalies(pt);
   checkGeofencesForPoint(pt);
   
-  // CRITICAL: update prevPoint for next iteration
   prevPoint = pt;
 }
 
@@ -1649,11 +1625,9 @@ async function startRecording(){
     return;
   }
 
-  // pick scenario label from UI (for diagnostics)
   const scenarioEl = document.getElementById('scenarioSelect');
   currentScenario = scenarioEl ? (scenarioEl.value || 'UNKNOWN') : 'UNKNOWN';
 
-  // reset gap tracker for this run
   lastFixTsForGap = null;
 
   recording = true;
@@ -1810,35 +1784,43 @@ stopBtn .addEventListener('click', stopRecording);
 window.playTrack = function(tid){
   const pts = allTracks[tid];
   if(!pts || !pts.length) return alert('No points');
-  map.setView([pts[0].filtered?.lat || pts[0].lat, pts[0].filtered?.lon || pts[0].lon], 16);
+  const first = getLatLonFromPoint(pts[0]);
+  if (first) {
+    map.setView([first.lat, first.lon], 16);
+  }
 
   let i=0;
-  const marker = L.circleMarker([pts[0].filtered?.lat || pts[0].lat, pts[0].filtered?.lon || pts[0].lon], {
+  const marker = L.circleMarker(first ? [first.lat, first.lon] : [0,0], {
     radius:5, color:'#111827', weight:1, fillColor:'#111827', fillOpacity:1
   }).addTo(map);
   const poly   = L.polyline([], {color:'#000', weight:10}).addTo(map);
   const iv = setInterval(()=>{
     if(i >= pts.length){ clearInterval(iv); return; }
-    poly.addLatLng([pts[i].filtered?.lat || pts[i].lat, pts[i].filtered?.lon || pts[i].lon]);
-    marker.setLatLng([pts[i].filtered?.lat || pts[i].lat, pts[i].filtered?.lon || pts[i].lon]);
-    pushToCharts(pts[i]);
+    const ll = getLatLonFromPoint(pts[i]);
+    if (ll) {
+      poly.addLatLng([ll.lat, ll.lon]);
+      marker.setLatLng([ll.lat, ll.lon]);
+      pushToCharts(pts[i]);
+    }
     i++;
   }, 350);
 };
 
-// UPDATED SIMULATOR: safer test data + debug
-window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=50){ // Reduced points for testing
+// UPDATED SIMULATOR: safer test data + debug + uses drawFullTrack centering
+window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=50){
   const tid = 'sim_'+Date.now();
   const pts = [];
   
-  console.log(`Creating simulated track at ${centerLat}, ${centerLon}`);
+  console.log(`[simulateTrack] Creating simulated track ${tid} at`, centerLat, centerLon);
   
+  const baseTs = Date.now();
   for(let i=0;i<n;i++){
     const angle = (i/n)*Math.PI*2;
     const lat = centerLat + Math.sin(angle)*0.01;
     const lon = centerLon + Math.cos(angle)*0.01;
-    const speed = 5 + 5*Math.abs(Math.sin(angle)); // More realistic speeds
+    const speed = 5 + 5*Math.abs(Math.sin(angle));
     
+    const ts = baseTs + i*2000;
     const p = { 
       raw: { 
         lat: lat, 
@@ -1847,7 +1829,7 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=50){ //
         accuracy: 5, 
         heading: (angle * 180/Math.PI) % 360, 
         speed: speed/3.6, 
-        timestamp: Date.now() + i*2000 
+        timestamp: ts 
       },
       quality: { 
         score: 85, 
@@ -1863,7 +1845,7 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=50){ //
         activity: classifyActivity(speed), 
         is_quality_point: true 
       },
-      ts: Date.now() + i*2000
+      ts: ts
     };
     pts.push(p);
   }
@@ -1871,26 +1853,17 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=50){ //
   await db.setItem(tid, pts);
   allTracks[tid] = pts;
   
-  console.log(`Simulated track created with ${pts.length} points`);
+  console.log(`[simulateTrack] Simulated track ${tid} stored with ${pts.length} points`);
   
-  // Force redraw
   clearAllPolylines();
   const color = palette[Object.keys(allTracks).length % palette.length];
+
+  console.log('[simulateTrack] Calling drawFullTrack for', tid);
   drawFullTrack(tid, color);
   addTrackListItem(tid, color, pts.length);
   updateActivitySummary();
   
-  // Center map on the track
-  if (pts.length > 0) {
-    const firstPt = pts[0];
-    const cLat = firstPt.filtered?.lat || firstPt.lat;
-    const cLon = firstPt.filtered?.lon || firstPt.lon;
-    map.setView([cLat, cLon], 14);
-  }
-  
   showAlert('Enhanced simulated track added - check console for debug info');
-  
-  // Debug the new track
   debugTrackData();
 };
 
@@ -1907,7 +1880,6 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=50){ //
   }
   await loadAllTracks();
   
-  // DEBUG: Check what's loaded
   debugTrackData();
   
   setTimeout(()=>{
@@ -1923,4 +1895,5 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=50){ //
 </script>
 </body>
 </html>
+
 
