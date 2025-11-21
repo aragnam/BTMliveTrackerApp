@@ -1850,11 +1850,13 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=50){
     pts.push(p);
   }
   
+  // Save in DB + memory
   await db.setItem(tid, pts);
   allTracks[tid] = pts;
   
   console.log(`[simulateTrack] Simulated track ${tid} stored with ${pts.length} points`);
   
+  // Remove old polylines, then draw this track
   clearAllPolylines();
   const color = palette[Object.keys(allTracks).length % palette.length];
 
@@ -1863,6 +1865,47 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=50){
   addTrackListItem(tid, color, pts.length);
   updateActivitySummary();
   
+  // 🔴 EXTRA: big red debug dots on every simulated point
+  pts.forEach(p => {
+    const lat = (p.filtered && typeof p.filtered.lat === 'number') ? p.filtered.lat
+              : (typeof p.lat === 'number' ? p.lat
+              : (p.raw && typeof p.raw.lat === 'number' ? p.raw.lat : null));
+    const lon = (p.filtered && typeof p.filtered.lon === 'number') ? p.filtered.lon
+              : (typeof p.lon === 'number' ? p.lon
+              : (p.raw && typeof p.raw.lon === 'number' ? p.raw.lon : null));
+
+    if (lat === null || lon === null || isNaN(lat) || isNaN(lon)) {
+      console.warn('[simulateTrack] Skipping invalid debug point', p);
+      return;
+    }
+
+    L.circleMarker([lat, lon], {
+      radius: 8,
+      color: '#ff0000',
+      weight: 3,
+      fillColor: '#ff0000',
+      fillOpacity: 0.9
+    }).addTo(map);
+  });
+
+  // 🔍 EXTRA: hard center + zoom on first point
+  const first = pts[0];
+  if (first) {
+    const lat = (first.filtered && typeof first.filtered.lat === 'number') ? first.filtered.lat
+              : (typeof first.lat === 'number' ? first.lat
+              : (first.raw && typeof first.raw.lat === 'number' ? first.raw.lat : null));
+    const lon = (first.filtered && typeof first.filtered.lon === 'number') ? first.filtered.lon
+              : (typeof first.lon === 'number' ? first.lon
+              : (first.raw && typeof first.raw.lon === 'number' ? first.raw.lon : null));
+
+    if (lat !== null && lon !== null && !isNaN(lat) && !isNaN(lon)) {
+      map.setView([lat, lon], 15);
+      console.log('[simulateTrack] Hard setView to', lat, lon);
+    } else {
+      console.warn('[simulateTrack] Could not setView, invalid first point', first);
+    }
+  }
+
   showAlert('Enhanced simulated track added - check console for debug info');
   debugTrackData();
 };
