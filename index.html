@@ -70,7 +70,10 @@
       flex:1;min-width:200px;background:#fff;border-radius:8px;
       border:1px solid #e6eef6;padding:8px
     }
-    canvas{width:100% !important;height:160px !important}
+    .chartCanvas{
+  width:100% !important;
+  height:160px !important;
+}
     .footer-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
     .searchrow{display:flex;gap:8px;margin-top:8px}
     pre#latest{
@@ -181,11 +184,11 @@
     <div id="charts">
       <div id="speedWrap">
         <div style="font-weight:600;margin-bottom:6px;font-size:0.9rem">Speed &amp; Heading (live)</div>
-        <canvas id="speedChart"></canvas>
+        <canvas id="speedChart" class="chartCanvas"></canvas>
       </div>
       <div id="activityWrap">
         <div style="font-weight:600;margin-bottom:6px;font-size:0.9rem">Activity timeline</div>
-        <canvas id="activityChart"></canvas>
+        <canvas id="activityChart" class="chartCanvas"></canvas>
       </div>
     </div>
 
@@ -415,7 +418,7 @@ function addBaseLayerIfOnline(){
 }
 
 function initMap(){
-  map = L.map('map', { preferCanvas:true }).setView([0,0], 2);
+  map = L.map('map').setView([0,0], 2);
 
   // tiles only if online
   addBaseLayerIfOnline();
