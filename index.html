@@ -71,9 +71,9 @@
       border:1px solid #e6eef6;padding:8px
     }
     .chartCanvas{
-  width:100% !important;
-  height:160px !important;
-}
+      width:100% !important;
+      height:160px !important;
+    }
     .footer-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
     .searchrow{display:flex;gap:8px;margin-top:8px}
     pre#latest{
@@ -118,6 +118,16 @@
           <option value="ONLINE_FOREGROUND">Test A – Data ON, foreground</option>
           <option value="OFFLINE_FOREGROUND">Test B – Data OFF, foreground</option>
           <option value="OTHER">Other / mixed</option>
+        </select>
+      </div>
+      <!-- NEW: Power mode selector -->
+      <div style="font-size:0.75rem;color:#475569;">
+        Power mode:
+        <select id="powerModeSelect"
+                style="font-size:0.75rem;padding:2px 4px;border-radius:4px;border:1px solid #cbd5e1;">
+          <option value="high">High detail (forensic)</option>
+          <option value="balanced" selected>Balanced</option>
+          <option value="battery">Battery saver</option>
         </select>
       </div>
     </div>
@@ -177,6 +187,13 @@
       style="position:absolute;left:12px;top:12px;z-index:1300;border-radius:8px;
              padding:6px 10px;background:#fff;border:1px solid #eef2f7;cursor:pointer">
       ☰
+    </button>
+
+    <!-- NEW: follow-live toggle -->
+    <button id="followBtn"
+      style="position:absolute;left:60px;top:12px;z-index:1300;border-radius:8px;
+             padding:6px 10px;background:#fff;border:1px solid #eef2f7;cursor:pointer">
+      🔒 Follow ON
     </button>
 
     <div id="map" aria-label="Map"></div>
@@ -471,6 +488,48 @@ const GAP_THRESHOLD_SEC = 10;
 // online/offline state
 let lastOnlineState = navigator.onLine;
 
+// NEW: power mode + movement-based saving + chart throttling + follow-live
+let powerMode = 'balanced'; // 'high' | 'balanced' | 'battery'
+
+let lastSavedPoint = null;
+const MIN_MOVE_FOR_SAVE_METERS = 5;
+const MIN_TIME_FOR_SAVE_SEC    = 5;
+
+let lastChartUpdateTs = 0;
+const CHART_UPDATE_INTERVAL_MS_HIGH     = 1000;
+const CHART_UPDATE_INTERVAL_MS_BALANCED = 1500;
+const CHART_UPDATE_INTERVAL_MS_BATTERY  = 3000;
+
+let followLive = true;
+
+// Helper: geolocation options based on power mode
+function getGeoOptions() {
+  if (powerMode === 'high') {
+    // Max detail: best for court-grade reconstruction
+    return {
+      enableHighAccuracy: true,
+      maximumAge: 0,
+      timeout: 5000
+    };
+  }
+
+  if (powerMode === 'battery') {
+    // Low-power: let OS reuse fixes, don't force GPS constantly
+    return {
+      enableHighAccuracy: false,
+      maximumAge: 15000,
+      timeout: 10000
+    };
+  }
+
+  // Balanced (default)
+  return {
+    enableHighAccuracy: true,
+    maximumAge: 5000,
+    timeout: 7000
+  };
+}
+
 const activityColor = {
   stationary:'#6b7280',
   walking   :'#16a34a',
@@ -545,7 +604,7 @@ const STYLE = {
   }
 };
 
-  // --- extra globals for filtering noise ---
+// --- extra globals for filtering noise ---
 let prevFixForSpeed = null;
 let speedWindow     = [];
 let lastSmoothedSpeed = 0;
@@ -967,13 +1026,13 @@ function drawFullTrack(tid, baseColor){
 
       if (coords.length > 1) {
         try {
-         const poly = L.polyline(coords, {
-  color: activityColor[seg.activity] || baseColor || '#ff0000',
-  weight: STYLE.segmentWeight,
-  opacity: STYLE.segmentOpacity,
-  lineCap: 'round',
-  lineJoin: 'round'
-}).addTo(map);
+          const poly = L.polyline(coords, {
+            color: activityColor[seg.activity] || baseColor || '#ff0000',
+            weight: STYLE.segmentWeight,
+            opacity: STYLE.segmentOpacity,
+            lineCap: 'round',
+            lineJoin: 'round'
+          }).addTo(map);
 
           segLayers.push(poly);
           console.log(`[drawFullTrack] Added segment (${seg.activity}) with ${coords.length} points`);
@@ -992,11 +1051,11 @@ function drawFullTrack(tid, baseColor){
 
   if (baseCoords.length > 1) {
     try {
-    const base = L.polyline(baseCoords, {
-  color: baseColor || '#000000',
-  weight: STYLE.baseWeight,
-  opacity: STYLE.baseOpacity
-}).addTo(map);
+      const base = L.polyline(baseCoords, {
+        color: baseColor || '#000000',
+        weight: STYLE.baseWeight,
+        opacity: STYLE.baseOpacity
+      }).addTo(map);
 
       base.on('click', ()=>{ toggleVisibility(tid); });
       polylineMap[tid] = base;
@@ -1004,9 +1063,8 @@ function drawFullTrack(tid, baseColor){
 
       const first = baseCoords[0];
       L.circleMarker(first, STYLE.startMarker)
-      .addTo(map)
-      .bindPopup(`Track start: ${tid}`);
-
+        .addTo(map)
+        .bindPopup(`Track start: ${tid}`);
 
       const bounds = base.getBounds();
       map.fitBounds(bounds, { padding: [40, 40] });
@@ -1043,14 +1101,14 @@ function debugTrackData() {
 
 // ENHANCED: Drawing with quality indicators
 function drawLivePoint(point){
- if(!currentPolyline){
-  currentPolyline = L.polyline([], {
-    color: activityColor[point.filtered?.activity || point.activity] || '#1f77b4',
-    weight: STYLE.liveTrackWeight,
-    lineCap: 'round',
-    lineJoin: 'round'
-  }).addTo(map);
-}
+  if(!currentPolyline){
+    currentPolyline = L.polyline([], {
+      color: activityColor[point.filtered?.activity || point.activity] || '#1f77b4',
+      weight: STYLE.liveTrackWeight,
+      lineCap: 'round',
+      lineJoin: 'round'
+    }).addTo(map);
+  }
   
   const ll = getLatLonFromPoint(point);
   if (!ll) {
@@ -1441,7 +1499,7 @@ function addGeofence(lat,lon,radius){
 function checkGeofencesForPoint(pt){
   geofences.forEach(g=>{
     const inside = haversine(pt, {lat:g.lat, lon:g.lon}) <= g.radius;
-   if(!inside) showAlert('⚠️ Left geofence', [pt.lat, pt.lon], 'geofence');
+    if(!inside) showAlert('⚠️ Left geofence', [pt.lat, pt.lon], 'geofence');
   });
 }
 
@@ -1452,24 +1510,24 @@ function detectAnomalies(point){
   if(prevPoint){
     const ds = (point.filtered?.speed || point.speed || 0) - (prevPoint.filtered?.speed || prevPoint.speed || 0);
     if(ds > 20){
-  showAlert(
-    '⚠️ Sudden speed increase +' + ds.toFixed(1) + ' km/h',
-    [point.filtered?.lat || point.lat, point.filtered?.lon || point.lon],
-    'deviation'
-  );
-}
+      showAlert(
+        '⚠️ Sudden speed increase +' + ds.toFixed(1) + ' km/h',
+        [point.filtered?.lat || point.lat, point.filtered?.lon || point.lon],
+        'deviation'
+      );
+    }
 
     if(prevPoint._bearing !== undefined){
       const bPrev = prevPoint._bearing;
       const bCur  = bearing(prevPoint, point);
       const diff  = Math.abs(((bCur - bPrev + 540) % 360) - 180);
       if(diff > 90){
-  showAlert(
-    '⚠️ Sharp turn detected',
-    [point.filtered?.lat || point.lat, point.filtered?.lon || point.lon],
-    'sharp_turn'
-  );
-}
+        showAlert(
+          '⚠️ Sharp turn detected',
+          [point.filtered?.lat || point.lat, point.filtered?.lon || point.lon],
+          'sharp_turn'
+        );
+      }
     }
     point._bearing = bearing(prevPoint, point);
 
@@ -1483,13 +1541,13 @@ function detectAnomalies(point){
         if(minD < 50) break;
       }
       if(minD > 150){
-  showAlert(
-    '⚠️ Route deviation detected',
-    [point.filtered?.lat || point.lat, point.filtered?.lon || point.lon],
-    'deviation'
-  );
-  break;
-}
+        showAlert(
+          '⚠️ Route deviation detected',
+          [point.filtered?.lat || point.lat, point.filtered?.lon || point.lon],
+          'deviation'
+        );
+        break;
+      }
     }
   }
   prevPoint = point;
@@ -1568,7 +1626,7 @@ function formatPos(pos){
   const c = pos.coords;
   const quality = calculateQualityScore(c);
   const qualityClass = quality.score >= 60 ? 'quality-good' : 
-                      quality.score >= 30 ? 'quality-medium' : 'quality-poor';
+                       quality.score >= 30 ? 'quality-medium' : 'quality-poor';
   
   return `Lat: ${c.latitude.toFixed(6)}
 Lng: ${c.longitude.toFixed(6)}
@@ -1597,20 +1655,39 @@ async function onPosition(pos){
   if (lastFixTsForGap !== null) {
     gapFromPrevSec = (pos.timestamp - lastFixTsForGap) / 1000;
     if (gapFromPrevSec > GAP_THRESHOLD_SEC) {
-  const msg = `⚠️ GPS gap of ${gapFromPrevSec.toFixed(1)} s`;
-  showAlert(msg, [c.latitude, c.longitude], 'gps_gap');
-  eventLog.push({
-    ts: Date.now(),
-    localTime: new Date().toLocaleString(),
-    message: msg,
-    lat: c.latitude,
-    lon: c.longitude,
-    gapSec: gapFromPrevSec,
-    kind: 'gps_gap'
-  });
-}
+      const msg = `⚠️ GPS gap of ${gapFromPrevSec.toFixed(1)} s`;
+      showAlert(msg, [c.latitude, c.longitude], 'gps_gap');
+      eventLog.push({
+        ts: Date.now(),
+        localTime: new Date().toLocaleString(),
+        message: msg,
+        lat: c.latitude,
+        lon: c.longitude,
+        gapSec: gapFromPrevSec,
+        kind: 'gps_gap'
+      });
+    }
   }
   lastFixTsForGap = pos.timestamp;
+
+  // ----------------- BATTERY-AWARE SKIPPING -----------------
+  if (powerMode === 'battery' && lastSavedPoint) {
+    const nowTs = pos.timestamp;
+    const dtSec = (nowTs - lastSavedPoint.raw.timestamp) / 1000;
+
+    const moveDist = haversine(
+      { lat: lastSavedPoint.raw.lat, lon: lastSavedPoint.raw.lon },
+      { lat: c.latitude,            lon: c.longitude }
+    );
+
+    // Tiny movement + short time: update UI only, skip heavy work
+    if (dtSec < MIN_TIME_FOR_SAVE_SEC && moveDist < MIN_MOVE_FOR_SAVE_METERS) {
+      latestEl.innerHTML = formatPos(pos);
+      exportBtn.disabled = false;
+      copyBtn.disabled   = false;
+      return;
+    }
+  }
 
   const rec = {
     timestamp: new Date(pos.timestamp).toISOString(),
@@ -1667,17 +1744,30 @@ async function onPosition(pos){
     gapFromPrevSec: gapFromPrevSec
   };
 
+  // Track last saved point (for battery-aware skipping)
+  lastSavedPoint = pt;
+
   if(currentTrackId){
     await savePoint(currentTrackId, pt);
   }
 
   drawLivePoint(pt);
   const ll = getLatLonFromPoint(pt);
-  if (ll) {
+  if (ll && followLive) {
     map.setView([ll.lat, ll.lon], 16);
   }
 
-  pushToCharts(pt);
+  // ------------- THROTTLED CHART UPDATES -------------
+  const nowMs = Date.now();
+  let chartInterval = CHART_UPDATE_INTERVAL_MS_BALANCED;
+  if (powerMode === 'high')    chartInterval = CHART_UPDATE_INTERVAL_MS_HIGH;
+  if (powerMode === 'battery') chartInterval = CHART_UPDATE_INTERVAL_MS_BATTERY;
+
+  if (nowMs - lastChartUpdateTs >= chartInterval) {
+    pushToCharts(pt);
+    lastChartUpdateTs = nowMs;
+  }
+
   detectAnomalies(pt);
   checkGeofencesForPoint(pt);
   
@@ -1711,6 +1801,8 @@ async function startRecording(){
   currentTrackId   = uuid();
   currentPolyline  = null;
   prevPoint        = null;
+  lastSavedPoint   = null;
+  lastChartUpdateTs = 0;
 
   await db.setItem(currentTrackId, []);
   allTracks[currentTrackId] = [];
@@ -1721,11 +1813,8 @@ async function startRecording(){
   stopBtn.disabled  = false;
   latestEl.textContent = 'Waiting for location... (grant permission if asked)';
 
-  watchId = navigator.geolocation.watchPosition(onPosition, onError, {
-    enableHighAccuracy:true,
-    maximumAge:0,
-    timeout:5000
-  });
+  const geoOptions = getGeoOptions();
+  watchId = navigator.geolocation.watchPosition(onPosition, onError, geoOptions);
 }
 
 async function stopRecording(){
@@ -1846,7 +1935,45 @@ document.getElementById('collapseBtn').addEventListener('click', ()=>{
   document.getElementById('sidebar').classList.toggle('collapsed');
   setTimeout(()=>map.invalidateSize(), 280);
 });
-document.getElementById('trainAI').addEventListener('click', ()=>trainPredictor());
+
+// NEW: power mode selector wiring + visibilitychange handling
+const powerModeSelect = document.getElementById('powerModeSelect');
+if (powerModeSelect) {
+  powerModeSelect.addEventListener('change', (e) => {
+    powerMode = e.target.value || 'balanced';
+    showAlert(`Power mode: ${powerMode}`, null, 'generic');
+  });
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    // Screen/tab hidden → downshift from high to balanced
+    if (powerMode === 'high') {
+      powerMode = 'balanced';
+      if (powerModeSelect) powerModeSelect.value = powerMode;
+    }
+  }
+});
+
+// NEW: follow-live button wiring
+const followBtn = document.getElementById('followBtn');
+if (followBtn) {
+  followBtn.addEventListener('click', () => {
+    followLive = !followLive;
+    followBtn.textContent = followLive ? '🔒 Follow ON' : '🔓 Follow OFF';
+  });
+}
+
+// UPDATED: guard AI training in battery mode
+document.getElementById('trainAI').addEventListener('click', () => {
+  if (powerMode === 'battery') {
+    if (!confirm('Battery saver is ON. Training the predictor uses more CPU and battery. Continue?')) {
+      return;
+    }
+  }
+  trainPredictor();
+});
+
 document.getElementById('simulate').addEventListener('click', ()=>simulateTrack());
 document.getElementById('bundleBtn').addEventListener('click', buildInvestigationBundle);
 document.getElementById('summaryBtn').addEventListener('click', buildCaseSummary);
@@ -2014,5 +2141,6 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=50){
 </script>
 </body>
 </html>
+
 
 
