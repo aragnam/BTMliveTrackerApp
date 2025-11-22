@@ -195,6 +195,15 @@
              padding:6px 10px;background:#fff;border:1px solid #eef2f7;cursor:pointer">
       🔒 Follow ON
     </button>
+   
+    <!-- Battery indicator + suggested mode -->
+    <div id="batteryBanner"
+      style="position:absolute;right:12px;top:12px;z-index:1300;
+             padding:6px 10px;border-radius:8px;
+             background:#f9fafb;border:1px solid #e5e7eb;
+             font-size:0.75rem;color:#111827;">
+      Battery: unknown
+    </div>
 
     <div id="map" aria-label="Map"></div>
 
@@ -490,6 +499,50 @@ let lastOnlineState = navigator.onLine;
 
 // NEW: power mode + movement-based saving + chart throttling + follow-live
 let powerMode = 'balanced'; // 'high' | 'balanced' | 'battery'
+// Battery info (if supported by browser)
+let batteryInfo = {
+  level: null,      // 0..1
+  charging: null
+};
+
+function suggestModeFromBattery(level) {
+  if (level === null || !Number.isFinite(level)) return null;
+  const pct = Math.round(level * 100);
+
+  if (pct >= 60) return 'high';
+  if (pct >= 30) return 'balanced';
+  return 'battery';
+}
+
+function updateBatteryBanner() {
+  const banner = document.getElementById('batteryBanner');
+  if (!banner) return;
+
+  if (batteryInfo.level === null) {
+    banner.textContent = 'Battery: unknown – mode: ' + powerMode;
+    return;
+  }
+
+  const pct = Math.round(batteryInfo.level * 100);
+  const suggested = suggestModeFromBattery(batteryInfo.level);
+
+  let line = `Battery ${pct}%`;
+  if (batteryInfo.charging === true) {
+    line += ' (charging)';
+  }
+
+  if (suggested) {
+    let humanLabel = '';
+    if (suggested === 'high') humanLabel = 'High detail';
+    if (suggested === 'balanced') humanLabel = 'Balanced';
+    if (suggested === 'battery') humanLabel = 'Battery saver';
+
+    line += ` – suggested: ${humanLabel}`;
+  }
+
+  line += ` – current: ${powerMode}`;
+  banner.textContent = line;
+}
 
 let lastSavedPoint = null;
 const MIN_MOVE_FOR_SAVE_METERS = 5;
@@ -1942,15 +1995,17 @@ if (powerModeSelect) {
   powerModeSelect.addEventListener('change', (e) => {
     powerMode = e.target.value || 'balanced';
     showAlert(`Power mode: ${powerMode}`, null, 'generic');
+    updateBatteryBanner();
   });
 }
 
 document.addEventListener('visibilitychange', () => {
+ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
-    // Screen/tab hidden → downshift from high to balanced
     if (powerMode === 'high') {
       powerMode = 'balanced';
       if (powerModeSelect) powerModeSelect.value = powerMode;
+      updateBatteryBanner();
     }
   }
 });
@@ -2119,6 +2174,30 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=50){
 (async function startup(){
   initMap();
   initCharts();
+  // Try Battery Status API (Chrome/Android usually supports it)
+  if (navigator.getBattery) {
+    try {
+      const battery = await navigator.getBattery();
+      batteryInfo.level    = battery.level;
+      batteryInfo.charging = battery.charging;
+      updateBatteryBanner();
+
+      battery.addEventListener('levelchange', () => {
+        batteryInfo.level = battery.level;
+        updateBatteryBanner();
+      });
+      battery.addEventListener('chargingchange', () => {
+        batteryInfo.charging = battery.charging;
+        updateBatteryBanner();
+      });
+    } catch (e) {
+      console.warn('Battery API error:', e);
+      updateBatteryBanner();
+    }
+  } else {
+    // No API: show banner but no percentage
+    updateBatteryBanner();
+  }
 
   const savedGeos = await db.getItem('__geofences__');
   if(savedGeos && Array.isArray(savedGeos)){
