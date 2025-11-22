@@ -202,7 +202,7 @@
              padding:6px 10px;border-radius:8px;
              background:#f9fafb;border:1px solid #e5e7eb;
              font-size:0.75rem;color:#111827;">
-      Battery: unknown
+      Battery: unknown – current: balanced
     </div>
 
     <div id="map" aria-label="Map"></div>
@@ -497,11 +497,14 @@ const GAP_THRESHOLD_SEC = 10;
 // online/offline state
 let lastOnlineState = navigator.onLine;
 
-// NEW: power mode + movement-based saving + chart throttling + follow-live
-let powerMode = 'balanced'; // 'high' | 'balanced' | 'battery'
+// ---------------------------------------------------------------------
+//  POWER MODE + BATTERY INDICATOR
+// ---------------------------------------------------------------------
+let powerMode = 'balanced';  // we can still wire this later to a dropdown
+
 // Battery info (if supported by browser)
 let batteryInfo = {
-  level: null,      // 0..1
+  level: null,    // 0..1
   charging: null
 };
 
@@ -519,16 +522,16 @@ function updateBatteryBanner() {
   if (!banner) return;
 
   if (batteryInfo.level === null) {
-    banner.textContent = 'Battery: unknown – mode: ' + powerMode;
+    banner.textContent = 'Battery: unknown – current: ' + powerMode;
     return;
   }
 
   const pct = Math.round(batteryInfo.level * 100);
   const suggested = suggestModeFromBattery(batteryInfo.level);
 
-  let line = `Battery ${pct}%`;
+  let text = `Battery ${pct}%`;
   if (batteryInfo.charging === true) {
-    line += ' (charging)';
+    text += ' (charging)';
   }
 
   if (suggested) {
@@ -537,13 +540,14 @@ function updateBatteryBanner() {
     if (suggested === 'balanced') humanLabel = 'Balanced';
     if (suggested === 'battery') humanLabel = 'Battery saver';
 
-    line += ` – suggested: ${humanLabel}`;
+    text += ` – suggested: ${humanLabel}`;
   }
 
-  line += ` – current: ${powerMode}`;
-  banner.textContent = line;
+  text += ` – current: ${powerMode}`;
+  banner.textContent = text;
 }
 
+// NEW: movement / chart throttling / follow-live helpers
 let lastSavedPoint = null;
 const MIN_MOVE_FOR_SAVE_METERS = 5;
 const MIN_TIME_FOR_SAVE_SEC    = 5;
@@ -2000,7 +2004,6 @@ if (powerModeSelect) {
 }
 
 document.addEventListener('visibilitychange', () => {
- document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
     if (powerMode === 'high') {
       powerMode = 'balanced';
@@ -2174,18 +2177,20 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=50){
 (async function startup(){
   initMap();
   initCharts();
-  // Try Battery Status API (Chrome/Android usually supports it)
-  if (navigator.getBattery) {
+
+  // Try Battery Status API (mostly Chrome/Android)
+  if (navigator.getBattery && typeof navigator.getBattery === 'function') {
     try {
       const battery = await navigator.getBattery();
-      batteryInfo.level    = battery.level;
-      batteryInfo.charging = battery.charging;
+      batteryInfo.level    = battery.level;    // 0..1
+      batteryInfo.charging = battery.charging; // true/false
       updateBatteryBanner();
 
       battery.addEventListener('levelchange', () => {
         batteryInfo.level = battery.level;
         updateBatteryBanner();
       });
+
       battery.addEventListener('chargingchange', () => {
         batteryInfo.charging = battery.charging;
         updateBatteryBanner();
@@ -2195,7 +2200,7 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=50){
       updateBatteryBanner();
     }
   } else {
-    // No API: show banner but no percentage
+    // No Battery API support: just show "unknown"
     updateBatteryBanner();
   }
 
@@ -2220,6 +2225,3 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=50){
 </script>
 </body>
 </html>
-
-
-
