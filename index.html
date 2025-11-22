@@ -487,8 +487,65 @@ const activityLabel = {
   driving   :'Driving'
 };
 const palette = ['#1f77b4','#9467bd','#8c564b','#e377c2','#17becf','#7f7f7f'];
+// ---------------------------------------------------------------------
+//  STYLE CONFIG — tweak these for presentation
+// ---------------------------------------------------------------------
+const STYLE = {
+  // Polyline thicknesses
+  segmentWeight: 8,        // coloured segments by activity
+  segmentOpacity: 1.0,
+  baseWeight: 4,           // thin base track
+  baseOpacity: 0.8,
+  liveTrackWeight: 10,     // live track polyline
 
-// --- extra globals for filtering noise ---
+  // Start-of-track marker
+  startMarker: {
+    radius: 10,
+    color: '#ff0000',
+    weight: 3,
+    fillColor: '#ff0000',
+    fillOpacity: 1
+  },
+
+  // Alert markers (change colours here)
+  genericAlertMarker: {
+    radius: 5,
+    color: '#f97316',
+    weight: 1.2,
+    fillColor: '#facc15',
+    fillOpacity: 0.95
+  },
+  sharpTurnMarker: {
+    radius: 7,
+    color: '#e11d48',      // reddish-pink
+    weight: 2,
+    fillColor: '#fb7185',
+    fillOpacity: 0.95
+  },
+  gpsGapMarker: {
+    radius: 7,
+    color: '#7c3aed',      // purple
+    weight: 2,
+    fillColor: '#a855f7',
+    fillOpacity: 0.95
+  },
+  deviationMarker: {
+    radius: 7,
+    color: '#f97316',      // orange
+    weight: 2,
+    fillColor: '#facc15',
+    fillOpacity: 0.95
+  },
+  geofenceMarker: {
+    radius: 7,
+    color: '#0ea5e9',      // blue
+    weight: 2,
+    fillColor: '#38bdf8',
+    fillOpacity: 0.95
+  }
+};
+
+  // --- extra globals for filtering noise ---
 let prevFixForSpeed = null;
 let speedWindow     = [];
 let lastSmoothedSpeed = 0;
@@ -669,7 +726,8 @@ function pushToCharts(pt){
 // ---------------------------------------------------------------------
 //  UI HELPERS
 // ---------------------------------------------------------------------
-function showAlert(msg, latlng){
+// kind = 'generic' | 'gps_gap' | 'sharp_turn' | 'deviation' | 'geofence'
+function showAlert(msg, latlng, kind = 'generic'){
   const el = document.getElementById('alerts');
   const ts = Date.now();
 
@@ -681,20 +739,24 @@ function showAlert(msg, latlng){
     localTime: new Date(ts).toLocaleString(),
     message : msg,
     lat     : latlng ? latlng[0] : null,
-    lon     : latlng ? latlng[1] : null
+    lon     : latlng ? latlng[1] : null,
+    kind
   });
 
   if(map && latlng){
-    const mk = L.circleMarker(latlng, {
-      radius: 5,
-      color: '#f97316',
-      weight: 1.2,
-      fillColor: '#facc15',
-      fillOpacity: 0.95
-    }).bindPopup(msg).addTo(map);
+    let style;
+    switch(kind){
+      case 'gps_gap':    style = STYLE.gpsGapMarker;    break;
+      case 'sharp_turn': style = STYLE.sharpTurnMarker; break;
+      case 'deviation':  style = STYLE.deviationMarker; break;
+      case 'geofence':   style = STYLE.geofenceMarker;  break;
+      default:           style = STYLE.genericAlertMarker;
+    }
+    const mk = L.circleMarker(latlng, style).bindPopup(msg).addTo(map);
     alertMarkers.push(mk);
   }
 }
+
 function clearAlerts(){
   alertMarkers.forEach(m => map.removeLayer(m));
   alertMarkers = [];
@@ -905,13 +967,14 @@ function drawFullTrack(tid, baseColor){
 
       if (coords.length > 1) {
         try {
-          const poly = L.polyline(coords, {
-            color: activityColor[seg.activity] || baseColor || '#ff0000',
-            weight: 8,
-            opacity: 1.0,
-            lineCap: 'round',
-            lineJoin: 'round'
-          }).addTo(map);
+         const poly = L.polyline(coords, {
+  color: activityColor[seg.activity] || baseColor || '#ff0000',
+  weight: STYLE.segmentWeight,
+  opacity: STYLE.segmentOpacity,
+  lineCap: 'round',
+  lineJoin: 'round'
+}).addTo(map);
+
           segLayers.push(poly);
           console.log(`[drawFullTrack] Added segment (${seg.activity}) with ${coords.length} points`);
         } catch (e) {
@@ -929,23 +992,21 @@ function drawFullTrack(tid, baseColor){
 
   if (baseCoords.length > 1) {
     try {
-      const base = L.polyline(baseCoords, {
-        color: baseColor || '#000000',
-        weight: 4,
-        opacity: 0.8
-      }).addTo(map);
+    const base = L.polyline(baseCoords, {
+  color: baseColor || '#000000',
+  weight: STYLE.baseWeight,
+  opacity: STYLE.baseOpacity
+}).addTo(map);
+
       base.on('click', ()=>{ toggleVisibility(tid); });
       polylineMap[tid] = base;
       console.log(`[drawFullTrack] Added base track with ${baseCoords.length} points`);
 
       const first = baseCoords[0];
-      L.circleMarker(first, {
-        radius: 10,
-        color: '#ff0000',
-        weight: 3,
-        fillColor: '#ff0000',
-        fillOpacity: 1
-      }).addTo(map).bindPopup(`Track start: ${tid}`);
+      L.circleMarker(first, STYLE.startMarker)
+      .addTo(map)
+      .bindPopup(`Track start: ${tid}`);
+
 
       const bounds = base.getBounds();
       map.fitBounds(bounds, { padding: [40, 40] });
@@ -982,14 +1043,14 @@ function debugTrackData() {
 
 // ENHANCED: Drawing with quality indicators
 function drawLivePoint(point){
-  if(!currentPolyline){
-    currentPolyline = L.polyline([], {
-      color: activityColor[point.filtered?.activity || point.activity] || '#1f77b4',
-      weight: 10,
-      lineCap: 'round',
-      lineJoin: 'round'
-    }).addTo(map);
-  }
+ if(!currentPolyline){
+  currentPolyline = L.polyline([], {
+    color: activityColor[point.filtered?.activity || point.activity] || '#1f77b4',
+    weight: STYLE.liveTrackWeight,
+    lineCap: 'round',
+    lineJoin: 'round'
+  }).addTo(map);
+}
   
   const ll = getLatLonFromPoint(point);
   if (!ll) {
@@ -1380,7 +1441,7 @@ function addGeofence(lat,lon,radius){
 function checkGeofencesForPoint(pt){
   geofences.forEach(g=>{
     const inside = haversine(pt, {lat:g.lat, lon:g.lon}) <= g.radius;
-    if(!inside) showAlert('⚠️ Left geofence', [pt.lat, pt.lon]);
+   if(!inside) showAlert('⚠️ Left geofence', [pt.lat, pt.lon], 'geofence');
   });
 }
 
@@ -1391,17 +1452,24 @@ function detectAnomalies(point){
   if(prevPoint){
     const ds = (point.filtered?.speed || point.speed || 0) - (prevPoint.filtered?.speed || prevPoint.speed || 0);
     if(ds > 20){
-      showAlert('⚠️ Sudden speed increase +' + ds.toFixed(1) + ' km/h',
-        [point.filtered?.lat || point.lat, point.filtered?.lon || point.lon]);
-    }
+  showAlert(
+    '⚠️ Sudden speed increase +' + ds.toFixed(1) + ' km/h',
+    [point.filtered?.lat || point.lat, point.filtered?.lon || point.lon],
+    'deviation'
+  );
+}
 
     if(prevPoint._bearing !== undefined){
       const bPrev = prevPoint._bearing;
       const bCur  = bearing(prevPoint, point);
       const diff  = Math.abs(((bCur - bPrev + 540) % 360) - 180);
       if(diff > 90){
-        showAlert('⚠️ Sharp turn detected', [point.filtered?.lat || point.lat, point.filtered?.lon || point.lon]);
-      }
+  showAlert(
+    '⚠️ Sharp turn detected',
+    [point.filtered?.lat || point.lat, point.filtered?.lon || point.lon],
+    'sharp_turn'
+  );
+}
     }
     point._bearing = bearing(prevPoint, point);
 
@@ -1415,9 +1483,13 @@ function detectAnomalies(point){
         if(minD < 50) break;
       }
       if(minD > 150){
-        showAlert('⚠️ Route deviation detected', [point.filtered?.lat || point.lat, point.filtered?.lon || point.lon]);
-        break;
-      }
+  showAlert(
+    '⚠️ Route deviation detected',
+    [point.filtered?.lat || point.lat, point.filtered?.lon || point.lon],
+    'deviation'
+  );
+  break;
+}
     }
   }
   prevPoint = point;
@@ -1525,17 +1597,18 @@ async function onPosition(pos){
   if (lastFixTsForGap !== null) {
     gapFromPrevSec = (pos.timestamp - lastFixTsForGap) / 1000;
     if (gapFromPrevSec > GAP_THRESHOLD_SEC) {
-      const msg = `⚠️ GPS gap of ${gapFromPrevSec.toFixed(1)} s`;
-      showAlert(msg, [c.latitude, c.longitude]);
-      eventLog.push({
-        ts: Date.now(),
-        localTime: new Date().toLocaleString(),
-        message: msg,
-        lat: c.latitude,
-        lon: c.longitude,
-        gapSec: gapFromPrevSec
-      });
-    }
+  const msg = `⚠️ GPS gap of ${gapFromPrevSec.toFixed(1)} s`;
+  showAlert(msg, [c.latitude, c.longitude], 'gps_gap');
+  eventLog.push({
+    ts: Date.now(),
+    localTime: new Date().toLocaleString(),
+    message: msg,
+    lat: c.latitude,
+    lon: c.longitude,
+    gapSec: gapFromPrevSec,
+    kind: 'gps_gap'
+  });
+}
   }
   lastFixTsForGap = pos.timestamp;
 
