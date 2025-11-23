@@ -204,6 +204,15 @@
              font-size:0.75rem;color:#111827;">
       Battery: unknown – current: balanced
     </div>
+    
+    <!-- Tiny one-line hint when suggestion flips -->
+    <div id="batteryHint"
+      style="position:absolute;right:12px;top:40px;z-index:1300;
+             padding:3px 6px;border-radius:999px;
+             background:#111827;color:#f9fafb;
+             font-size:0.7rem;opacity:0;transition:opacity 0.25s;">
+      <!-- filled by JS -->
+    </div>
 
     <div id="map" aria-label="Map"></div>
 
@@ -507,7 +516,10 @@ let batteryInfo = {
   level: null,    // 0..1
   charging: null
 };
+let lastSuggestedMode = null;
+let lastSuggestedPct  = null;
 
+  
 function suggestModeFromBattery(level) {
   if (level === null || !Number.isFinite(level)) return null;
   const pct = Math.round(level * 100);
@@ -519,32 +531,55 @@ function suggestModeFromBattery(level) {
 
 function updateBatteryBanner() {
   const banner = document.getElementById('batteryBanner');
+  const hint   = document.getElementById('batteryHint');
   if (!banner) return;
 
   if (batteryInfo.level === null) {
-    banner.textContent = 'Battery: unknown – current: ' + powerMode;
+    banner.textContent = 'Battery: unknown – mode: ' + powerMode;
+    if (hint) {
+      hint.style.opacity = 0;
+      hint.textContent = '';
+    }
     return;
   }
 
   const pct = Math.round(batteryInfo.level * 100);
   const suggested = suggestModeFromBattery(batteryInfo.level);
 
-  let text = `Battery ${pct}%`;
+  let line = `Battery ${pct}%`;
   if (batteryInfo.charging === true) {
-    text += ' (charging)';
+    line += ' (charging)';
   }
+
+  let humanLabel = '';
+  if (suggested === 'high')     humanLabel = 'High detail';
+  if (suggested === 'balanced') humanLabel = 'Balanced';
+  if (suggested === 'battery')  humanLabel = 'Battery saver';
 
   if (suggested) {
-    let humanLabel = '';
-    if (suggested === 'high') humanLabel = 'High detail';
-    if (suggested === 'balanced') humanLabel = 'Balanced';
-    if (suggested === 'battery') humanLabel = 'Battery saver';
-
-    text += ` – suggested: ${humanLabel}`;
+    line += ` – suggested: ${humanLabel}`;
   }
 
-  text += ` – current: ${powerMode}`;
-  banner.textContent = text;
+  line += ` – current: ${powerMode}`;
+  banner.textContent = line;
+
+  // --- Micro-banner when suggestion flips ---
+  if (hint && suggested && suggested !== lastSuggestedMode) {
+    const targetLabel = humanLabel || suggested;
+    hint.textContent = `Battery ${pct}% → suggest ${targetLabel}`;
+    hint.style.opacity = 1;
+
+    // fade out after a few seconds
+    setTimeout(() => {
+      // only hide if the text hasn't changed since
+      if (hint.textContent === `Battery ${pct}% → suggest ${targetLabel}`) {
+        hint.style.opacity = 0;
+      }
+    }, 4500);
+
+    lastSuggestedMode = suggested;
+    lastSuggestedPct  = pct;
+  }
 }
 
 // NEW: movement / chart throttling / follow-live helpers
