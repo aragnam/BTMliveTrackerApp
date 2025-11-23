@@ -1,3 +1,30 @@
+// --- Runtime Domain Lock (Level 3 Security) ---
+(function enforceDomainLock() {
+  try {
+    const allowedDomains = [
+      'aragnam.github.io',
+      'localhost',
+      '127.0.0.1'
+    ];
+
+    const currentHost = window.location.hostname;
+
+    if (!allowedDomains.includes(currentHost)) {
+      // Block execution immediately
+      document.body.innerHTML = `
+        <div style="font-family:Arial;text-align:center;margin-top:4rem;">
+          <h2>Unauthorized Deployment</h2>
+          <p>This version of BTM Live Tracker is not allowed on:</p>
+          <p><strong>${currentHost}</strong></p>
+        </div>
+      `;
+      throw new Error('Unauthorized domain: ' + currentHost);
+    }
+  } catch (err) {
+    throw err; // fail closed
+  }
+})();
+
 // ---------------------------------------------------------------------
 //  COMMON UTILITIES & STORAGE
 // ---------------------------------------------------------------------

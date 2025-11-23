@@ -2,9 +2,9 @@
   "name": "btm-live-tracker",
   "version": "1.0.0",
   "description": "BTM Live Tracker — Enhanced Forensic Mode (frontend)",
-  "scripts": {
-    "build": "javascript-obfuscator btm-tracker.js --output btm-tracker.obf.js --compact true --control-flow-flattening true --dead-code-injection true --string-array true --string-array-encoding base64 --rename-globals false"
-  },
+ "scripts": {
+  "build": "javascript-obfuscator btm-tracker.js --output btm-tracker.obf.js --compact true --control-flow-flattening true --dead-code-injection true --string-array true --string-array-encoding base64 --rename-globals false --domain-lock aragnam.github.io --domain-lock localhost --domain-lock 127.0.0.1"
+},
   "devDependencies": {
     "javascript-obfuscator": "^4.1.0"
   }
