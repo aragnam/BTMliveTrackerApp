@@ -1,1 +1,12 @@
+{
+  "name": "btm-live-tracker",
+  "version": "1.0.0",
+  "description": "BTM Live Tracker — Enhanced Forensic Mode (frontend)",
+  "scripts": {
+    "build": "javascript-obfuscator btm-tracker.js --output btm-tracker.obf.js --compact true --control-flow-flattening true --dead-code-injection true --string-array true --string-array-encoding base64 --rename-globals false"
+  },
+  "devDependencies": {
+    "javascript-obfuscator": "^4.1.0"
+  }
+}
 
