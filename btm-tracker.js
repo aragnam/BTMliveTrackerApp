@@ -1,4 +1,3 @@
-<script>
 // ---------------------------------------------------------------------
 //  COMMON UTILITIES & STORAGE
 // ---------------------------------------------------------------------
@@ -2007,5 +2006,5 @@ window.simulateTrack = async function(centerLat=-29.1, centerLon=26.2, n=50){
     latestEl.textContent = 'Tap Start to allow location access and begin tracking.';
   }
 })();
-</script>
+
 
